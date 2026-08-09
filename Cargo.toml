@@ -6,6 +6,7 @@ members = [
   "sync-color-schemes",
   "deps/cairo",
   "wezterm",
+  "wezterm-android",
   "wezterm-blob-leases",
   "wezterm-cell",
   "wezterm-escape-parser",

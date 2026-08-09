@@ -33,6 +33,12 @@ anyhow.workspace = true
 cc.workspace = true
 embed-resource.workspace = true
 
+# The Android build produces a cdylib loaded by an Activity, which has no main
+# of its own; see src/android.rs.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity.workspace = true
+ndk-sys.workspace = true
+
 [dependencies]
 anyhow.workspace = true
 bitflags.workspace = true

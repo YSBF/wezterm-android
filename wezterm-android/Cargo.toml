@@ -1,0 +1,22 @@
+[package]
+name = "wezterm-android"
+version = "0.1.0"
+authors = ["Wez Furlong <wez@wezfurlong.org>"]
+edition = "2021"
+resolver = "2"
+publish = false
+
+# An Activity dlopen()s this and calls android_main; there is no executable.
+# The crate is empty on every other platform so that a workspace build on a
+# desktop host does not have to link a pointless shared object.
+[lib]
+name = "wezterm_gui"
+crate-type = ["cdylib"]
+
+[features]
+default = ["vendored-fonts"]
+vendored-fonts = ["wezterm-gui/vendored-fonts"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity.workspace = true
+wezterm-gui = { path = "../wezterm-gui", default-features = false }
