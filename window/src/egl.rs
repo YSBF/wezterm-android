@@ -689,6 +689,7 @@ impl GlState {
     /// True while this state has no window surface bound, i.e. between a
     /// `release_surface` and the matching `rebuild_surface`. Rendering must
     /// be suppressed while this holds.
+    #[cfg_attr(not(target_os = "android"), allow(unused))]
     pub fn is_surfaceless(&self) -> bool {
         *self.surface.borrow() == ffi::NO_SURFACE
     }
@@ -696,6 +697,7 @@ impl GlState {
     /// Detach and destroy the window surface, leaving the context and every
     /// GL object it owns intact. Used when the underlying native window is
     /// going away but the application is not.
+    #[cfg_attr(not(target_os = "android"), allow(unused))]
     pub fn release_surface(&self) {
         let mut surface = self.surface.borrow_mut();
         if *surface == ffi::NO_SURFACE {
@@ -717,6 +719,7 @@ impl GlState {
     /// The surface is created against the same EGLConfig the context was
     /// created with, so the context does not need to be recreated and its
     /// textures survive.
+    #[cfg_attr(not(target_os = "android"), allow(unused))]
     pub fn rebuild_surface(&self, window: ffi::EGLNativeWindowType) -> anyhow::Result<()> {
         self.release_surface();
 
