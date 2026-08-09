@@ -11,7 +11,16 @@ publish = false
 env_logger.workspace = true
 
 [features]
+default = ["ssh"]
 distro-defaults = []
+
+# Parse ~/.ssh/config to auto-generate SSH domains.
+#
+# This is the only thing `config` uses wezterm-ssh for, and because
+# everything depends on `config` it pulls openssl, libssh and libssh2 into
+# anything that only wanted to read wezterm.lua. Turning it off makes
+# `Config::ssh_domains()` return only what the config file declares.
+ssh = ["dep:wezterm-ssh"]
 
 [dependencies]
 anyhow.workspace = true
@@ -40,7 +49,7 @@ wezterm-bidi.workspace = true
 wezterm-config-derive.workspace = true
 wezterm-dynamic.workspace = true
 wezterm-input-types.workspace = true
-wezterm-ssh.workspace = true
+wezterm-ssh = { workspace = true, optional = true }
 wezterm-term = { workspace = true, features=["use_serde"] }
 
 [target."cfg(unix)".dependencies]

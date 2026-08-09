@@ -108,6 +108,19 @@ pub struct SshDomain {
 impl_lua_conversion_dynamic!(SshDomain);
 
 impl SshDomain {
+    /// Enumerate the hosts named in the user's ssh config files and produce a
+    /// domain for each, in both plain-ssh and wezterm-multiplexing flavours.
+    ///
+    /// Returns an empty list when the `ssh` feature is disabled: parsing
+    /// ~/.ssh/config is the only reason `config` depends on wezterm-ssh, and
+    /// with it off the user's explicitly declared `ssh_domains` are all there
+    /// is.
+    #[cfg(not(feature = "ssh"))]
+    pub fn default_domains() -> Vec<Self> {
+        vec![]
+    }
+
+    #[cfg(feature = "ssh")]
     pub fn default_domains() -> Vec<Self> {
         let mut config = wezterm_ssh::Config::new();
         config.add_default_config_files();
