@@ -1,7 +1,12 @@
 # Android GUI port plan
 
-Status: **toolchain proven (it links), porting not started. The binary has never
-been run on a device and is known to abort at startup — see Phase 1.**
+Status: **all phases implemented; nothing has been run on a device.**
+
+Every phase below is written and cross-compiles, and the cdylib links for
+`aarch64-linux-android` against nothing but Android-native libraries. What has
+*not* happened is a single execution: no device was available, so the exit
+criteria stated per phase are unverified. Treat the code as a starting point
+for a `logcat` session, not as working software. See "What remains" at the end.
 
 The goal is a native Android GUI backend for wezterm — a fourth sibling to
 `x11`, `wayland`, `macos` and `windows` under `window/src/os/` — reusing the
@@ -32,13 +37,14 @@ mlua/lua54, libssh, libssh2, openssl, and all ~37k lines of `wezterm-gui` —
 cross-compiled unmodified. `portable-pty` and `termwiz` needed no changes at
 all.
 
-The probe worktree and its diff live at
-`/home/ysbf/Archive/tools/wezterm-android-probe` (`android-probe.patch`).
+The probe's changes have since been superseded by the real port; what follows
+records why each one was needed, because every one of them is a trap that is
+easy to fall into again.
 
 ### What the probe did *not* prove
 
 It proved the binary **links**, not that it **runs**. Every method in the stub
-backend is `todo!()`, and the process aborts before reaching any of them:
+backend was `todo!()`, and the process aborted before reaching any of them:
 
 ```rust
 // config/src/lib.rs:69
@@ -52,10 +58,12 @@ all fall back to `HOME_DIR` too.
 
 The mitigating detail: `HOME_DIR` is a `lazy_static`, so setting `HOME` before
 anything first touches `config` is sufficient and needs no change to `config`
-itself. That makes it an entry-point concern, addressed in Phase 1.
+itself. That makes it an entry-point concern, and it is what
+`wezterm-gui/src/android/mod.rs` now does.
 
 Assume there are more assertions like this on the startup path; `HOME_DIR` is
-simply the first one. See the risks section for how to flush them out cheaply.
+simply the first one that was *found*, and it was found by reading, not by
+running. See "What remains" for how to flush out the rest cheaply.
 
 ### Why the GUI ports at all
 
@@ -76,23 +84,19 @@ Android uses natively. `raw-window-handle` 0.6 already has
 
 ## Reproducing the build
 
+This is now recorded in `ci/android-env.sh`, which Gradle also sources so that
+there is one definition of the environment:
+
 ```bash
-NDK=$HOME/Application/Android_SDK/ndk/28.0.12674087
-BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
-API=28
-
 rustup target add aarch64-linux-android
+export ANDROID_NDK_HOME=$HOME/Application/Android_SDK/ndk/28.0.12674087
 
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android$API-clang
-export CC_aarch64_linux_android=$BIN/aarch64-linux-android$API-clang
-export CXX_aarch64_linux_android=$BIN/aarch64-linux-android$API-clang++
-export AR_aarch64_linux_android=$BIN/llvm-ar
-export RANLIB_aarch64_linux_android=$BIN/llvm-ranlib
-export CFLAGS_aarch64_linux_android="--target=aarch64-linux-android$API -fPIC"
-
-cargo build --target aarch64-linux-android -p wezterm-gui \
+. ci/android-env.sh
+cargo build --target aarch64-linux-android -p wezterm-android \
       --no-default-features --features vendored-fonts
 ```
+
+For the APK, `cd android && ./gradlew installDebug`.
 
 `--no-default-features` matters: the default feature set includes `wayland`,
 which turns on `window/wayland`.
@@ -107,7 +111,10 @@ Two traps worth recording:
 - **Do not build under `/tmp`** if it is a tmpfs. The target directory reaches
   ~7 GB and will exhaust RAM.
 
-## The four changes needed to build
+## The four changes needed to build ✅
+
+All four are implemented as described. The reasoning is kept here because each
+one is a trap that is easy to fall into again.
 
 ### 1. openssl must be vendored — for Android only
 
@@ -179,11 +186,13 @@ Fix: drop Android from that target block, gate `wezterm-font/src/fcwrap.rs` and
 `NopSystemSource`, and `vendored-fonts` is on by default, so the binary ships
 with JetBrains Mono, Nerd Font symbols, Roboto and Noto Emoji compiled in.
 
-**This is a stopgap, not a solution — see Phase 6.**
+This was the stopgap; Phase 7 replaced it with a real system font source, and
+`FontLocatorSelection::Android` is now the default there.
 
-## Upstreamable independently of Android
+## Upstreamable independently of Android ✅
 
-One finding is worth a PR regardless of whether this port ever ships.
+One finding was worth a PR regardless of whether this port ever ships, and is
+now implemented as an optional `ssh` feature on `config`, on by default.
 
 `config` depends on `wezterm-ssh` non-optionally, and its entire use is
 `config/src/ssh.rs:112` — three calls that parse `~/.ssh/config` to enumerate
@@ -196,257 +205,211 @@ for host in config.enumerate_hosts() { ... }
 ```
 
 Because everything depends on `config`, that one text-parsing call site pulls
-openssl + libssh + libssh2 into every binary in the tree. Feature-gating it
-would cut build times and the dependency surface for all platforms.
+openssl + libssh + libssh2 into anything that only wanted to read
+`wezterm.lua`.
+
+One correction to the original claim: it is *not* every binary in the tree.
+`mux` and `wezterm-client` depend on `wezterm-ssh` in their own right, so the
+GUI and the mux server still link it regardless. What benefits is anything
+wanting `config` without the mux — `sync-color-schemes` here, and any
+downstream embedding of the crate.
 
 ## Phased plan
 
-Phase 0 is done. Phases 1–4a are the architectural work — entry point,
-surface lifetime, process lifetime. Phases 4b–8 are where a usable terminal
-actually lives. Phase 9 is close to free once the rest works.
+Every phase is implemented. The exit criteria are stated as originally written
+and remain **unverified**, because nothing has been run on a device.
 
 ### Phase 0 — cross-compile and link ✅
 
-Done, with the caveat above: it links, it does not run.
+Done. The four build changes are in, each scoped to the Android target so no
+other platform is affected; `ci/android-env.sh` records the cross-compile
+environment.
 
-### Phase 1 — APK shell, entry point, and environment bootstrap
+### Phase 1 — APK shell, entry point, and environment bootstrap ✅
 
-Today the probe produces a `[[bin]]` with `fn main()`. An Android app needs a
-`cdylib` loaded by an Activity.
+`wezterm-gui/src/main.rs` became `src/lib.rs`, and `wezterm-android` is a
+`cdylib` shim exporting `android_main`.
 
-- Add `crate-type = ["cdylib"]` for the Android target.
-- Adopt `android-activity` with **GameActivity**, not NativeActivity. This is
-  not a neutral choice and should be settled here rather than revisited later:
-  NativeActivity's soft-keyboard/IME support is poor, while GameActivity ships
-  GameTextInput, which maps far more directly onto the commit/composing-text
-  handling Phase 5 needs. Switching later means redoing the input layer.
-- Minimal gradle project + manifest; `cargo-ndk` to place `.so` per ABI.
-- Ship `aarch64` only at first; add `armv7`/`x86_64` later.
+GameActivity was chosen over NativeActivity, and that decision is now baked
+into the manifest and the input layer. It was not a neutral choice:
+NativeActivity's soft-keyboard support is too thin for a terminal, while
+GameActivity ships GameTextInput, whose commit and composing-text events are
+what Phase 5's IME handling is built on. Note that the upstream GameActivity
+C++ 'prefab' glue must *not* be enabled; android-activity supplies its own and
+the two are incompatible.
 
-**Environment bootstrap — do this before any code touches `config`.** Android
-app processes have no `HOME`, no `TMPDIR`, and a `PATH` that is useless for
-spawning shells. At minimum, set from the JNI entry point:
+`wezterm-gui/src/android/mod.rs` sets `HOME`, `XDG_CONFIG_HOME`,
+`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_RUNTIME_DIR`, `TMPDIR`, `TERM`, `LANG`,
+`PATH` and `SHELL` before anything touches `config`, and routes `log` to logcat
+first of all so that the startup path is diagnosable.
 
-| Variable | Value |
-|---|---|
-| `HOME` | app internal files dir (`Context.getFilesDir()`) |
-| `XDG_CONFIG_HOME` | a `config/` subdir of the above |
-| `XDG_RUNTIME_DIR` | app cache dir |
-| `TMPDIR` | app cache dir |
-| `PATH` | the bundled prefix from Phase 4 |
+On editing `wezterm.lua` on device: the config lives at
+`$HOME/.config/wezterm/wezterm.lua` inside the app's private files directory.
+For development that is reachable with `adb shell run-as`. A scoped-storage or
+SAF import flow, or an in-app editor, is still needed before this is usable by
+anyone who is not holding a USB cable — that is unbuilt.
 
-Also decide here how a user edits `wezterm.lua` on device, because it
-constrains the path layout: the internal files dir is not reachable by other
-apps, so it needs either a scoped-storage/SAF import flow, an in-app editor, or
-a documented `adb push` path for development. Termux performs a full
-environment bootstrap for exactly these reasons; this is not optional polish.
+Exit criterion (unverified): APK installs and launches to a blank surface, and
+gets past config initialisation.
 
-Exit criterion: APK installs and launches to a blank surface, reaches
-`Connection::create_new`, and panics there on `todo!()` — i.e. it got past
-config initialisation.
+### Phase 2 — EGL surface and first frame ✅
 
-### Phase 2 — EGL surface and first frame
+`Connection::create_new` binds to `AndroidApp`; `Window::window_handle` returns
+`RawWindowHandle::AndroidNdk`; `enable_opengl` goes through the shared
+`crate::egl::GlState` with `EGL_DEFAULT_DISPLAY`.
 
-- Implement `Connection::create_new` against `AndroidApp`.
-- Implement `Window::window_handle` returning `RawWindowHandle::AndroidNdk`
-  wrapping `ANativeWindow`.
-- Implement `WindowOps::enable_opengl` via the shared `crate::egl::GlState`
-  (`window/src/egl.rs:492`), mirroring `window/src/os/x11/window.rs:165`.
-- Wire `invalidate` / `finish_frame` to the frame callback.
+`enable_opengl` waits for the first `InitWindow` rather than failing, because
+`TermWindow::new` may reach it before Android has produced a surface.
 
-Exit criterion: the wezterm tab bar and a cell grid render on screen.
+Exit criterion (unverified): the tab bar and a cell grid render on screen.
 
-### Phase 3 — lifecycle and surface loss ⚠️ architectural
+### Phase 3 — lifecycle and surface loss ✅
 
-This is the one change that touches shared code rather than the new backend.
+This turned out smaller than feared, and the reason is worth recording: an
+`EGLContext` **survives** the destruction of its `EGLSurface`. Textures,
+programs and therefore the entire glyph atlas persist across a background,
+rotate or configuration change. Only the surface has to be swapped.
 
-`ConnectionOps::run_message_loop()` assumes the app owns the loop and that the
-window outlives the app. Android inverts both: the OS owns the loop, and the
-`ANativeWindow` and its EGLSurface are destroyed and recreated on every
-background, rotate, or config change.
+So rather than giving `TermWindow` a context-rebuild path, `window/src/egl.rs`
+gained `release_surface`/`rebuild_surface`, which destroy and recreate only the
+`EGLSurface` against the retained `EGLConfig`. `TermWindow` is untouched, and
+`gl: Option<Rc<Context>>` never has to become `None`.
 
-Nothing in the `window` crate or in `TermWindow` (`gl: Option<Rc<glium::backend::Context>>`,
-`wezterm-gui/src/termwindow/mod.rs:466`) models "surface lost, rebuild the GL
-context". Glyph cache and atlas textures must be repopulated on recreate.
+The loop inversion is handled by driving `AndroidApp::poll_events` from
+`run_message_loop`, which also has to service the spawn queue and
+invalidation-driven painting. The spawn queue signals a pipe rather than the
+`ALooper`, so a watcher thread translates pipe readability into wakeups; that
+is less invasive than teaching `window/src/spawn.rs` about Android.
 
-Plan: drive the loop from `AndroidApp::poll_events`, add explicit
-`SurfaceCreated`/`SurfaceDestroyed` transitions, and give `TermWindow` a
-context-rebuild path. `WindowOps::notify` (`window/src/lib.rs:255`) maps onto
-posting a user event into the `ALooper` queue.
+Exit criterion (unverified): rotate the device and switch apps briefly —
+rendering resumes on the recreated surface.
 
-Exit criterion: rotate the device and switch apps briefly — rendering resumes
-correctly on the recreated surface.
+### Phase 4 — process lifetime, PTY, and exec ✅
 
-Note this covers **surface** lifetime only. Surviving a backgrounded app is a
-different and larger problem, handled in Phase 4.
+#### 4a. Process lifetime
 
-### Phase 4 — process lifetime, PTY, and exec
-
-#### 4a. Process lifetime ⚠️ prerequisite
-
-Surface recreation does not save you from process death. Android will kill a
-backgrounded app, taking the mux and every child shell with it — so "check your
-email, come back, your build is still running" does not work by default, no
-matter how well Phase 3 goes.
-
-This requires Java/Kotlin-side work with no Rust analogue in the tree:
-
-- A **foreground Service** hosting the mux, with a persistent notification.
-- Probably a partial `WakeLock` so long-running commands are not suspended.
-- `POST_NOTIFICATIONS` permission handling (API 33+).
-- A decision on what the notification shows — active pane count, running
-  command, or a stop action.
-
-Treat this as a prerequisite for "usable terminal", not a later refinement.
+`MuxService` is a foreground service with an ongoing notification, a stop
+action, and a partial `WakeLock` so that long-running commands are not
+suspended when the screen goes off. `POST_NOTIFICATIONS` is requested at
+startup on API 33+; a denial is not fatal.
 
 #### 4b. PTY and exec
 
-`portable-pty` already cross-compiles unmodified and bionic has
-`libc::openpty` (`pty/src/unix.rs:36`), so the PTY itself is expected to work.
-The problem is *what gets exec'd*.
+The machinery is in place; the binaries are not. `wezterm-gui/src/android/prefix.rs`
+links every `lib<name>.so` in the native library directory to `<name>` in
+`$HOME/.local/bin` and puts that first on `PATH`, asking multi-call binaries
+for their applet lists. `SHELL` resolves to the best bundled shell, falling
+back to `/system/bin/sh` — note that `/bin/sh`, which `portable-pty` reaches
+for, does not exist on Android.
 
-`portable-pty` already cross-compiles unmodified and bionic has
-`libc::openpty` (`pty/src/unix.rs:36`), so the PTY itself is expected to work.
-The problem is *what gets exec'd*.
+`android/app/src/main/prefix/<abi>/` is where prebuilt binaries go. Building a
+static bash and busybox for Android is a separate exercise and has not been
+done, so today the terminal runs whatever toybox provides in `/system/bin`.
 
-Since API 29, apps may not exec binaries from writable app data (W^X), and
-SELinux constrains the rest.
+Reusing an installed Termux prefix remains not viable; `android/README.md`
+records why, so that nobody spends time on it again.
 
-**Bundle the shell in the APK's native library directory.** That directory is
-the one place an app may both read and execute from, so binaries are shipped
-named `lib*.so` (`libbash.so`, `libcoreutils.so`) and `extractNativeLibs` is
-left enabled. This is the standard Termux-on-modern-Android approach and needs
-no root. It carries its own decisions:
+Exit criterion (unverified): an interactive shell in a pane, correct on resize.
 
-- Which shell — `bash` is the expected default; a `mksh`/`busybox ash` fallback
-  is much smaller.
-- Which coreutils — a single multi-call `busybox`/`toybox` blob keeps size and
-  build complexity down versus per-utility binaries.
-- APK size budget, and per-ABI splits so an arm64 device does not carry armv7
-  copies.
-- A first-run step that populates the prefix and rewrites `PATH` (Phase 1).
+### Phase 5 — input ✅
 
-Root/Magisk remains available to exec from an arbitrary prefix, but it makes
-the app root-only; treat it as a fallback, not the design.
+`window/src/os/android/keyboard.rs` maps Android keycodes, consulting the
+originating device's `KeyCharacterMap` so that non-US physical keyboards work,
+and handling dead keys via `get_dead_char`. Ctrl is masked out of the character
+map lookup so that Ctrl-A still resolves to `a`.
 
-**Reusing an installed Termux prefix is not viable — do not spend time on it.**
-Termux's `usr` tree lives in its private data directory, which SELinux makes
-unreachable from another app irrespective of exec permissions. `sharedUserId`
-would require Termux's signing key (and is deprecated), and its `run-command`
-intent executes in *Termux's* process, which cannot give us a PTY master fd in
-ours.
+Soft keyboard text arrives separately, as whole-buffer GameTextInput updates
+with a composing region. Committed text is recovered by diffing against the
+previously seen buffer; text still inside the composing region is reported as
+composition status rather than being sent to the pty.
 
-Exit criterion: an interactive shell in a pane, correct on resize
-(`TIOCSWINSZ`), surviving a backgrounded app via 4a.
+The extra-keys row is `wezterm-gui/src/termwindow/keyrow.rs`, built from the
+existing box model. Modifiers latch, and the latch is applied in
+`key_event_impl` — the single point every key press passes through — which is
+what lets Ctrl apply to a character that arrived from an IME with no modifiers
+of its own.
 
-### Phase 5 — input
+### Phase 6 — clipboard ✅
 
-Terminals need Ctrl, Alt, Esc, arrows and function keys; Android supplies IME
-text commits. `inputmap.rs` (811 lines) and `keyevent.rs` (871 lines) are
-modelled on physical keyboards with modifiers.
+JNI to `android.content.ClipboardManager`, marshalled onto the Java main
+thread. `coerceToText` rather than `getText`, so URIs and intents paste as
+text. `PrimarySelection` aliases the single Android clipboard.
 
-- Map IME commit / composing text onto the existing dead-key and IME paths.
-- Build an extra-keys row (Ctrl/Alt/Esc/Tab/arrows/Fn). `termwindow/box_model.rs`
-  is a usable toolkit for this; it does not need to be Android-native UI.
-- Support physical keyboards over Bluetooth/USB as a first-class path — it is
-  the cheapest way to get a usable terminal early.
+Unvalidated: Android 13+ shows a system copy confirmation and truncates large
+clips. Terminal-sized selections have not been tested against that.
 
-### Phase 6 — clipboard
+### Phase 7 — fonts and CJK ✅
 
-`WindowOps::get_clipboard` / `set_clipboard` (`window/src/lib.rs:317-320`) have
-no default body — every other backend implements them, and copy/paste is core
-terminal functionality, so this is a phase item rather than a footnote.
+`wezterm-font/src/locator/android.rs` enumerates `/system/fonts` and its
+siblings and parses `/system/etc/fonts.xml` for family and fallback ordering,
+which is what makes CJK and emoji fallback work. Parsing is tolerant of all
+three historical formats and of vendor variation, and degrades to plain
+directory enumeration rather than failing. `FontLocatorSelection::Android` is
+the default there.
 
-The NDK exposes no clipboard API, so this is JNI to `android.content.ClipboardManager`:
+### Phase 8 — touch ✅
 
-- `setPrimaryClip` / `getPrimaryClip` marshalled across JNI, on the main thread.
-- Map wezterm's `Clipboard::{Clipboard, PrimarySelection}` onto the single
-  Android clipboard; primary-selection has no equivalent and should alias or
-  no-op rather than error.
-- Android 13+ shows a system copy confirmation and truncates large clips —
-  worth checking against terminal-sized selections.
-- Paste must sanitise clipboard text the same way the desktop paths do
-  (bracketed paste, newline handling).
+`window/src/os/android/touch.rs` recognises gestures rather than pretending a
+finger is a mouse: tap focuses, drag scrolls with fling momentum, long press
+starts a selection, pinch changes the font size. Scroll gestures are consumed
+by the client so that scrollback works inside `less`; tap and long-press
+synthesise press/release/move, so a TUI that requested mouse tracking still
+sees them.
 
-This interacts directly with Phase 8 (touch): long-press-to-select is only useful once
-copy works, so the two are best built and tested together.
+### Phase 9 — mux client ✅
 
-### Phase 7 — fonts and CJK ⚠️ blocking for CJK users
+When `default_domain` names an ssh, TLS or unix domain, the Android entry point
+builds the same `StartCommand` that `wezterm connect <name>` would, including
+`attach` so that the client adopts the panes already on the server.
+`always_new_process` is unconditional: there is only one process, and its
+discovery socket lives where nothing else can reach it.
 
-`ConfigDirsOnly` sees only vendored fonts and configured `font_dirs`. It will
-not see `/system/fonts`, and the bundled JetBrains Mono has no CJK coverage.
-Android has no fontconfig, so `font_config.rs` cannot be reused.
+`CODEC_VERSION` stays in sync by construction, since the app and the mux server
+build from the same tree.
 
-Write `wezterm-font/src/locator/android.rs`, roughly the size of `gdi.rs`:
+## What remains
 
-- Enumerate `/system/fonts`, `/system/font`, `/product/fonts`.
-- Parse `/system/etc/fonts.xml` for family and fallback ordering.
-- Feed `ParsedFont` entries into the existing fallback machinery.
+**Run it.** Everything above is unverified. The cheapest next step is unchanged
+from the original plan and is now much more likely to get somewhere: install
+the APK, `adb logcat`, and work through whatever assertion fires first. The
+environment bootstrap logs its resolved paths at info level on the way up.
 
-The whole cell-grid alignment problem that `wezterm-font`'s 10,266 lines solve
-— CJK wide characters, Nerd Font fallback, grid alignment — does not go away on
-Android; it just needs a different font source.
+Specifically unbuilt or unvalidated:
 
-### Phase 8 — touch
+- **No shell is bundled.** Phase 4b's machinery is in place but
+  `android/app/src/main/prefix/` is empty. A static bash and busybox have to be
+  built for Android.
+- **No way to edit `wezterm.lua` on device** except `adb shell run-as`.
+- **Binary size is unmeasured.** The debug cdylib is ~700 MB. Release + LTO +
+  stripping has not been measured; vendored fonts and the Lua runtime are not
+  small.
+- **Battery and thermals.** Continuous GPU compositing of a terminal is not
+  something the desktop backends ever had to economise on. The loop blocks on
+  the looper when idle and only spins for fling momentum and long-press
+  timing, but this has not been measured.
+- **Insets.** The Activity draws edge to edge, but nothing accounts for the
+  status bar, the navigation bar or a display cutout when laying out the grid.
+- **The soft keyboard covering the terminal.** `adjustResize` is set, and
+  `ContentRectChanged` triggers a resize, but whether the grid ends up the
+  right size with the keyboard up is untested.
+- **Upstream appetite is unknown.** The `egl.rs` surface-swap change and the
+  `effective_bottom_padding` helper touch shared code. Both are small and
+  neither changes behaviour on other platforms, which should help, but this is
+  worth raising in a GitHub Discussion.
 
-`mouseevent.rs` (1,053 lines) is a mouse state machine: hover, drag-select,
-click-to-focus-pane. None of it has a touch analogue in the existing backends.
+## Risks that did not materialise
 
-Design a gesture layer before writing code: tap to focus, long-press to start
-selection with a magnifier, drag to scroll with momentum, pinch to change font
-size, edge-swipe for tab switching. Decide explicitly what maps to terminal
-mouse reporting versus what the client consumes.
+- **Phase 3 was expected to be the real risk.** It was not, because the
+  EGLContext survives surface loss. The shared-code change is confined to
+  `egl.rs` (+140/-21, much of it the surfaceless guards on the glium `Backend`
+  impl) and no other platform's behaviour changes.
+- **The GUI needing porting.** It did not. `wezterm-gui` compiled unmodified
+  apart from the entry point split and the new key row.
 
-### Phase 9 — mux client
+## Risks that remain
 
-Largely free once the above works: `wezterm connect` uses `wezterm-client` in
-process, so `renderable.rs`'s `lines: LruCache` (line 68) and
-`predict_from_key_event` (line 212) provide local scrollback and local echo on
-the device — the original motivation for choosing wezterm over a plain SSH
-client.
-
-Note `CODEC_VERSION` (currently 45, `codec/src/lib.rs:444`) is checked for
-strict equality at `wezterm-client/src/client.rs:1160`. Because the app and the
-mux server build from the same source tree, versions stay in sync by
-construction — which is exactly why this beats reimplementing the protocol.
-
-Also note `wezterm/src/main.rs:752` routes `connect`/`ssh` through
-`delegate_to_gui`; on Android there is no separate GUI process to delegate to,
-so the entry point needs its own path.
-
-## Risks and open questions
-
-- **Phase 3 is the real risk.** Surface-loss handling touches shared code and
-  is the most likely source of upstream friction.
 - **More desktop assumptions are hiding on the startup path.**
-  `config/src/lib.rs:69` is the first `expect` that fires, not necessarily the
-  last, and each one is only discoverable by running. Cheap mitigation, worth
-  doing before Phase 1 design work: push the existing probe binary to a device
-  and run it under `adb shell run-as` (or in a Termux shell with `HOME` set),
-  and read `logcat`. It will abort immediately, but each iteration surfaces the
-  next assumption in minutes. This turns "toolchain proven" into "binary runs",
-  which is a materially stronger starting point.
+  `config/src/lib.rs:69` was the first `expect` that fires, not necessarily the
+  last, and each one is only discoverable by running.
 - **Soft-keyboard quality is out of our control** and largely determines
-  whether the result is pleasant. Validate early with a physical keyboard so
-  this does not block Phases 2–4.
-- **Binary size**: the debug build is 587 MB. Release + LTO + stripping needs
-  measuring; vendored fonts and the Lua runtime are not small.
-- **Battery and thermals**: continuous GPU compositing of a terminal is not
-  something the desktop backends ever had to economise on. Damage-driven
-  repaint may need revisiting.
-- **Upstream appetite is unknown.** Phases 1–3 imply changes to shared
-  abstractions. Worth raising in a GitHub Discussion before writing Phase 3.
-
-## Suggested first milestone
-
-Phase 0.5 first, because it is nearly free: push the existing probe binary to a
-device and iterate on the startup-path assumptions until it reaches
-`Connection::create_new` and panics on `todo!()`. No APK, no gradle, no
-Kotlin — just `adb`, `logcat`, and environment variables. This converts the
-biggest unknown ("what else assumes a desktop?") into a finite list before any
-architectural work starts.
-
-Then Phases 1–2: an APK that launches and renders the tab bar over EGL, with
-input and PTY stubbed. That is the smallest artifact that proves the renderer
-works on-device, and it is the point at which the remaining unknowns become
-measurable rather than estimated.
+  whether the result is pleasant.
