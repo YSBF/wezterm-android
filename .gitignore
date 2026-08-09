@@ -66,3 +66,9 @@ dhat-heap.json
 /__pycache__/
 /nix/result
 *.qcow2
+
+# Android app project
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

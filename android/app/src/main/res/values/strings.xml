@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WezTerm</string>
+    <string name="mux_running">Terminal sessions are running</string>
+    <string name="mux_stop">Stop</string>
+    <string name="mux_channel_name">Terminal sessions</string>
+    <string name="mux_channel_description">Shown while shells are running in the background so that Android does not stop them.</string>
+</resources>
