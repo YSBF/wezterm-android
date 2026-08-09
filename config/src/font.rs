@@ -670,6 +670,8 @@ pub enum FontLocatorSelection {
     Gdi,
     /// Use CoreText on macOS
     CoreText,
+    /// Enumerate /system/fonts and parse /system/etc/fonts.xml on Android
+    Android,
     /// Use only the font_dirs configuration to locate fonts
     ConfigDirsOnly,
 }
@@ -681,10 +683,7 @@ impl Default for FontLocatorSelection {
         } else if cfg!(target_os = "macos") {
             FontLocatorSelection::CoreText
         } else if cfg!(target_os = "android") {
-            // Android has no fontconfig. This is a stopgap that sees only the
-            // vendored fonts and any configured font_dirs; see the Android
-            // font locator for the real system font source.
-            FontLocatorSelection::ConfigDirsOnly
+            FontLocatorSelection::Android
         } else {
             FontLocatorSelection::FontConfig
         }

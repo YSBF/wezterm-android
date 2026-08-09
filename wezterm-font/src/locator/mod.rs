@@ -7,6 +7,8 @@ use std::fmt::Display;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(target_os = "android")]
+pub mod android;
 pub mod core_text;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
 pub mod font_config;
@@ -238,6 +240,12 @@ pub fn new_locator(locator: FontLocatorSelection) -> Arc<dyn FontLocator + Send 
             return Arc::new(gdi::GdiFontLocator {});
             #[cfg(not(windows))]
             panic!("Gdi not compiled in");
+        }
+        FontLocatorSelection::Android => {
+            #[cfg(target_os = "android")]
+            return Arc::new(android::AndroidFontLocator::new());
+            #[cfg(not(target_os = "android"))]
+            panic!("the Android font locator is not compiled in");
         }
         FontLocatorSelection::ConfigDirsOnly => Arc::new(NopSystemSource {}),
     }
