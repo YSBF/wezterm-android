@@ -68,9 +68,47 @@ adb logcat -s wezterm_gui:V wezterm:V window:V config:V
 The environment bootstrap logs the resolved paths at info level on the way up,
 which is the fastest way to tell whether `HOME` and `PATH` came out right.
 
-## What is not here yet
+## Bundling a shell
 
-The APK contains no shell. `PATH` includes `/system/bin`, so whatever toybox
-provides is available, but a real prefix — bash, coreutils — has to be bundled
-into the native library directory as `lib*.so` files, which is the one place an
-app may both read and execute from since API 29. See `docs/android-port-plan.md`.
+The APK ships no shell of its own. `PATH` includes `/system/bin`, so whatever
+toybox provides is available and the terminal works, but `bash` and a fuller
+set of utilities have to be bundled.
+
+Since API 29 an app may not execute a binary out of its writable data
+directory, and SELinux constrains most of what is left. The one directory an
+app may both read *and* execute from is the APK's native library directory. The
+installer only extracts and marks executable those files matching `lib*.so`, so
+binaries are shipped under that name:
+
+```
+android/app/src/main/prefix/
+  arm64-v8a/
+    libbash.so         -> becomes `bash`
+    libbusybox.so      -> becomes `busybox`, plus one link per applet
+```
+
+At startup wezterm creates `$HOME/.local/bin/<name>` as a symlink to the
+matching `lib<name>.so` and puts that directory first on `PATH`. `execve`
+resolves the symlink and applies the W^X and SELinux checks to the target,
+which lives in the executable directory, so this needs no root. Multi-call
+binaries are asked for their applet list (`busybox --list`, `toybox --long`)
+and get one link each; a dedicated binary always wins over an applet of the
+same name.
+
+`SHELL` is set to the best shell found, preferring `bash`, and falls back to
+`/system/bin/sh`. Note that `/bin/sh`, which `portable-pty` would otherwise
+reach for, does not exist on Android.
+
+Building those binaries for Android is a separate exercise; the NDK toolchain
+in `ci/android-env.sh` is the right starting point. Watch the APK size budget:
+a static bash plus busybox is a few MB per ABI, which is why per-ABI splits are
+on.
+
+### Why not reuse an installed Termux prefix
+
+Termux's `usr` tree lives in its private data directory, which SELinux makes
+unreachable from another app irrespective of execute permissions.
+`sharedUserId` would need Termux's signing key and is deprecated, and its
+`run-command` intent executes in *Termux's* process, which cannot hand a pty
+master fd back to ours. Root/Magisk would allow executing from an arbitrary
+prefix, but that makes the app root-only; it is a fallback, not the design.

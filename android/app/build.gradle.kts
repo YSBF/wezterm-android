@@ -83,6 +83,12 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs"))
+            // Prebuilt shell and utility binaries, named lib<command>.so and
+            // laid out per ABI. The native library directory is the only place
+            // an app may both read and execute from since API 29, so this is
+            // where a bundled bash or busybox has to go; the Rust side links
+            // them to their real names at startup. See android/README.md.
+            jniLibs.srcDir("src/main/prefix")
         }
     }
 }

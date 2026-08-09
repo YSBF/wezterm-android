@@ -14,6 +14,8 @@
 //! module is. Nothing in here may reference `config` before `bootstrap_env`
 //! has run.
 
+pub mod prefix;
+
 use android_activity::AndroidApp;
 use std::path::{Path, PathBuf};
 
@@ -134,6 +136,9 @@ pub struct AndroidDirs {
     /// may both read and execute from since API 29, so it is where a bundled
     /// shell has to live, and it goes on `PATH`.
     pub native_lib: Option<PathBuf>,
+    /// Symlinks that give the bundled binaries their real names; see
+    /// `prefix.rs`.
+    pub prefix: prefix::Prefix,
 }
 
 /// Populate the environment an app process does not get for free.
@@ -183,13 +188,24 @@ pub fn bootstrap_env(app: &AndroidApp) -> anyhow::Result<AndroidDirs> {
     }
 
     let native_lib = native_library_dir();
-    set_path(native_lib.as_deref());
+
+    // Give any bundled binaries usable names before PATH and SHELL are
+    // derived from them.
+    let prefix = prefix::populate(&home, native_lib.as_deref());
+
+    set_path(&prefix.bin, native_lib.as_deref());
+
+    // portable-pty falls back to /bin/sh, which does not exist on Android, so
+    // SHELL has to be set explicitly. CommandBuilder consults the environment
+    // before the passwd database, so setting it here is enough.
+    std::env::set_var("SHELL", prefix.shell());
 
     Ok(AndroidDirs {
         home,
         config,
         cache,
         native_lib,
+        prefix,
     })
 }
 
@@ -221,8 +237,8 @@ fn native_library_dir() -> Option<PathBuf> {
 /// library directory -- the one place an app may both read and execute from --
 /// comes first. Anything bundled there is shipped named `lib*.so` so that the
 /// installer extracts it with the execute bit set.
-fn set_path(native_lib: Option<&Path>) {
-    let mut entries: Vec<String> = vec![];
+fn set_path(prefix_bin: &Path, native_lib: Option<&Path>) {
+    let mut entries: Vec<String> = vec![prefix_bin.display().to_string()];
 
     if let Some(dir) = native_lib {
         entries.push(dir.display().to_string());
