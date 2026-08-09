@@ -7,6 +7,20 @@ use wezterm_term::color::ColorAttribute;
 use window::color::LinearRgba;
 
 impl crate::TermWindow {
+    /// Draw the extra-keys row into the bottom padding reserved for it by
+    /// `effective_bottom_padding`.
+    pub fn paint_key_row_if_enabled(&mut self) -> anyhow::Result<()> {
+        if !crate::termwindow::keyrow::key_row_enabled(&self.config) {
+            return Ok(());
+        }
+        if self.key_row.is_none() {
+            let row = self.build_key_row()?;
+            self.key_row.replace(row);
+        }
+        self.ui_items.append(&mut self.paint_key_row()?);
+        Ok(())
+    }
+
     pub fn paint_tab_bar(&mut self, layers: &mut TripleLayerQuadAllocator) -> anyhow::Result<()> {
         // While any tab shows the indeterminate progress spinner, ask to be
         // repainted when its next frame is due. The paint scheduler wakes us

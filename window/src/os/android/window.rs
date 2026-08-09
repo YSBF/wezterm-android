@@ -155,7 +155,32 @@ impl WindowInner {
             return;
         }
         self.has_focus = focused;
+        self.update_soft_keyboard(focused);
         self.events.dispatch(WindowEvent::FocusChanged(focused));
+    }
+
+    /// Raise the soft keyboard when the terminal takes focus, unless the
+    /// device has a physical keyboard attached.
+    ///
+    /// A terminal is always accepting text, so there is no "tap to edit" step
+    /// for the user to perform; leaving the keyboard down would just look
+    /// broken. Devices with a real keyboard are left alone because raising the
+    /// soft one there would cover the terminal for no reason.
+    fn update_soft_keyboard(&mut self, focused: bool) {
+        let app = match super::app::try_android_app() {
+            Some(app) => app,
+            None => return,
+        };
+
+        if has_physical_keyboard(app) {
+            return;
+        }
+
+        if focused {
+            app.show_soft_input(true);
+        } else {
+            app.hide_soft_input(true);
+        }
     }
 
     pub(crate) fn enable_opengl(&mut self) -> anyhow::Result<Rc<glium::backend::Context>> {
@@ -358,6 +383,22 @@ fn char_boundary_slice(s: &str, start: usize, end: usize) -> &str {
         return "";
     }
     &s[start..end]
+}
+
+/// True when a hardware keyboard is attached and usable.
+///
+/// `Keyboard::NoKeys` covers the ordinary phone case. A device with a physical
+/// keyboard that is currently folded away reports the keyboard but also
+/// reports its keys as hidden, and in that state the soft keyboard is still
+/// wanted.
+fn has_physical_keyboard(app: &android_activity::AndroidApp) -> bool {
+    use ndk::configuration::{Keyboard, KeysHidden};
+
+    let config = app.config();
+    match config.keyboard() {
+        Keyboard::NoKeys | Keyboard::Any => false,
+        _ => !matches!(config.keys_hidden(), KeysHidden::Yes | KeysHidden::Soft),
+    }
 }
 
 fn leds_from_meta_state(meta: android_activity::input::MetaState) -> KeyboardLedStatus {

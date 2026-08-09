@@ -73,6 +73,7 @@ pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
 pub mod keyevent;
+pub mod keyrow;
 pub mod modal;
 mod mouseevent;
 pub mod palette;
@@ -154,6 +155,7 @@ pub enum TermWindowNotif {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UIItemType {
     TabBar(TabBarItem),
+    KeyRow(crate::termwindow::keyrow::KeyRowKey),
     CloseTab(usize),
     AboveScrollThumb,
     ScrollThumb,
@@ -394,6 +396,12 @@ pub struct TermWindow {
     show_scroll_bar: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
+    /// The extra-keys row; see keyrow.rs. Rebuilt whenever a modifier
+    /// latch changes, which is why it is cached separately from the tab bar.
+    key_row: Option<box_model::ComputedElement>,
+    /// Modifiers armed by tapping them in the extra-keys row, waiting to
+    /// be consumed by the next key press from any source.
+    key_row_latched: ::window::Modifiers,
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
@@ -651,7 +659,10 @@ impl TermWindow {
             pixel_cell: render_metrics.cell_size.height as f32,
         };
         let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let key_row_height =
+            Self::key_row_pixel_height_impl(&config, &fontconfig, &render_metrics).unwrap_or(0.);
+        let padding_bottom =
+            resize::effective_bottom_padding(&config, v_context, key_row_height);
 
         let mut dimensions = Dimensions {
             pixel_width: (terminal_size.pixel_width + padding_left + padding_right) as usize,
@@ -716,6 +727,8 @@ impl TermWindow {
             show_scroll_bar: config.enable_scroll_bar,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
+            key_row: None,
+            key_row_latched: ::window::Modifiers::NONE,
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),
@@ -1790,6 +1803,7 @@ impl TermWindow {
             .update_config(&config);
         self.fancy_tab_bar.take();
         self.invalidate_fancy_tab_bar();
+        self.key_row.take();
         self.invalidate_modal();
         self.input_map = InputMap::new(&config);
         self.leader_is_down = None;

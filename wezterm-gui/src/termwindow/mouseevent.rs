@@ -40,6 +40,7 @@ impl super::TermWindow {
                 self.update_title_post_status();
             }
             UIItemType::CloseTab(_)
+            | UIItemType::KeyRow(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -51,6 +52,7 @@ impl super::TermWindow {
         match item.item_type {
             UIItemType::TabBar(_) => {}
             UIItemType::CloseTab(_)
+            | UIItemType::KeyRow(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -382,6 +384,28 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
+            UIItemType::KeyRow(key) => {
+                self.mouse_event_key_row(key, event, context);
+            }
+        }
+    }
+
+    /// A tap on the extra-keys row. Only the press edge is acted on: a
+    /// latching modifier that toggled on both press and release would never
+    /// stay armed.
+    pub fn mouse_event_key_row(
+        &mut self,
+        key: crate::termwindow::keyrow::KeyRowKey,
+        event: MouseEvent,
+        context: &dyn WindowOps,
+    ) {
+        if !matches!(event.kind, WMEK::Press(MousePress::Left)) {
+            return;
+        }
+        if self.key_row_clicked(key, context) {
+            // The latch highlight lives in the cached element tree.
+            self.key_row.take();
+            context.invalidate();
         }
     }
 

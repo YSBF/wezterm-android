@@ -21,8 +21,8 @@ use crate::units::Dimension;
 use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;
 use crate::{
-    default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
-    default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
+    default_android_extra_keys_row, default_config_with_overrides_applied, default_one_point_oh,
+    default_one_point_oh_f64, default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
@@ -478,6 +478,17 @@ pub struct Config {
     pub enable_tab_bar: bool,
     #[dynamic(default = "default_true")]
     pub use_fancy_tab_bar: bool,
+
+    /// If true, display a row of extra keys (Esc, Ctrl, Alt, Shift, Tab and a
+    /// navigation cluster) along the bottom of the window.
+    ///
+    /// An Android soft keyboard delivers IME text commits, which carry no
+    /// modifier information, so without this row there is no way to press
+    /// Ctrl and the terminal cannot be used for much. It therefore defaults on
+    /// there and off everywhere else; a user with a permanently attached
+    /// Bluetooth keyboard can turn it off to reclaim the space.
+    #[dynamic(default = "default_android_extra_keys_row")]
+    pub android_extra_keys_row: bool,
 
     #[dynamic(default)]
     pub tab_bar_at_bottom: bool,

@@ -596,11 +596,22 @@ impl super::TermWindow {
         }
     }
 
-    pub fn key_event_impl(&mut self, window_key: KeyEvent, context: &dyn WindowOps) {
+    pub fn key_event_impl(&mut self, mut window_key: KeyEvent, context: &dyn WindowOps) {
         let pane = match self.get_active_pane_or_overlay() {
             Some(pane) => pane,
             None => return,
         };
+
+        // Fold in any modifiers armed from the extra-keys row. This has to
+        // happen here rather than in the backend because a soft keyboard
+        // delivers characters through the IME with no modifier information at
+        // all, and this is the one point every key press passes through.
+        if !self.key_row_latched.is_empty() && window_key.key_is_down {
+            let latched = self.take_key_row_latch();
+            window_key.modifiers |= latched;
+            self.key_row.take();
+            context.invalidate();
+        }
 
         // The leader key is a kind of modal modifier key.
         // It is allowed to be active for up to the leader timeout duration,

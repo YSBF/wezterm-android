@@ -168,6 +168,7 @@ impl super::TermWindow {
         } else {
             0.
         };
+        let key_row_height = self.key_row_pixel_height().unwrap_or(0.);
 
         let border = self.get_os_border();
 
@@ -198,7 +199,7 @@ impl super::TermWindow {
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
             let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
             let padding_bottom =
-                config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+                effective_bottom_padding(&config, v_context, key_row_height);
             let padding_right = effective_right_padding(&config, h_context);
 
             let pixel_height = (rows * self.render_metrics.cell_size.height as usize)
@@ -244,7 +245,7 @@ impl super::TermWindow {
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
             let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
             let padding_bottom =
-                config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+                effective_bottom_padding(&config, v_context, key_row_height);
             let padding_right = effective_right_padding(&config, h_context);
 
             let avail_width = dimensions.pixel_width.saturating_sub(
@@ -507,7 +508,9 @@ impl super::TermWindow {
         };
         let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
         let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-        let padding_bottom = config.window_padding.bottom.evaluate_as_pixels(v_context) as usize;
+        let key_row_height =
+            Self::key_row_pixel_height_impl(&config, &fontconfig, &render_metrics)?;
+        let padding_bottom = effective_bottom_padding(&config, v_context, key_row_height);
 
         let dimensions = Dimensions {
             pixel_width: ((terminal_size.cols as usize * render_metrics.cell_size.width as usize)
@@ -553,6 +556,21 @@ impl super::TermWindow {
             },
         )
     }
+}
+
+/// Computes the effective padding for the bottom edge.
+///
+/// This exists for the same reason as `effective_right_padding`: something
+/// other than the terminal grid needs to live there. On Android the
+/// extra-keys row is drawn in this space, and reserving it here means every
+/// layout site that already accounts for bottom padding keeps the grid clear
+/// of it without further changes.
+pub fn effective_bottom_padding(
+    config: &ConfigHandle,
+    context: DimensionContext,
+    key_row_height: f32,
+) -> usize {
+    config.window_padding.bottom.evaluate_as_pixels(context) as usize + key_row_height as usize
 }
 
 /// Computes the effective padding for the RHS.

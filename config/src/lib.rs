@@ -832,3 +832,9 @@ fn default_one_point_oh() -> f32 {
 fn default_true() -> bool {
     true
 }
+
+/// The extra-keys row is the only way to press Ctrl on a touch device, so it
+/// defaults on there; on a desktop it would just take up space.
+fn default_android_extra_keys_row() -> bool {
+    cfg!(target_os = "android")
+}
