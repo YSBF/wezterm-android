@@ -10,5 +10,10 @@ publish = false
 anyhow.workspace = true
 config.workspace = true
 luahelper.workspace = true
-starship-battery.workspace = true
 wezterm-dynamic.workspace = true
+
+# starship-battery has no Android backend and fails with a compile_error!.
+# A real implementation would read /sys/class/power_supply or go through
+# BatteryManager over JNI.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+starship-battery.workspace = true

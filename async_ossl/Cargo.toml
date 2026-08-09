@@ -11,9 +11,14 @@ publish = false
 [dependencies]
 async-io.workspace = true
 
-[target.'cfg(not(any(windows, target_os="macos")))'.dependencies]
+[target.'cfg(not(any(windows, target_os="macos", target_os="android")))'.dependencies]
 openssl.workspace = true
 
-[target.'cfg(any(windows, target_os="macos"))'.dependencies]
+# Platforms with no system openssl to link against. Note that
+# [workspace.dependencies] cannot itself be made target-conditional, so the cfg
+# has to live here in the consuming crate; because the workspace uses
+# resolver = "2", enabling openssl/vendored here turns on openssl-sys/vendored
+# for these targets only, which in turn satisfies libssh-rs-sys and libssh2-sys.
+[target.'cfg(any(windows, target_os="macos", target_os="android"))'.dependencies]
 openssl = { workspace = true, features=["vendored"] }
 

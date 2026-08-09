@@ -21,6 +21,12 @@ struct BatteryInfo {
 }
 impl_lua_conversion_dynamic!(BatteryInfo);
 
+#[cfg(target_os = "android")]
+fn battery_info<'lua>(_: &'lua Lua, _: ()) -> mlua::Result<Vec<BatteryInfo>> {
+    Ok(vec![])
+}
+
+#[cfg(not(target_os = "android"))]
 fn battery_info<'lua>(_: &'lua Lua, _: ()) -> mlua::Result<Vec<BatteryInfo>> {
     use starship_battery::{Manager, State};
     let manager = Manager::new().map_err(mlua::Error::external)?;
@@ -47,6 +53,7 @@ fn battery_info<'lua>(_: &'lua Lua, _: ()) -> mlua::Result<Vec<BatteryInfo>> {
     Ok(result)
 }
 
+#[cfg(not(target_os = "android"))]
 fn opt_string(s: Option<&str>) -> String {
     match s {
         Some(s) => s,

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, ensure, Error};
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 
@@ -84,8 +85,18 @@ impl Drop for GlConnection {
 #[derive(Debug)]
 pub struct GlState {
     connection: Rc<GlConnection>,
-    surface: ffi::types::EGLSurface,
+    /// The window surface. This is a RefCell rather than a plain field
+    /// because on Android the native window is destroyed and recreated
+    /// whenever the app is backgrounded, rotated or reconfigured, while
+    /// the EGLContext (and therefore every texture and program we have
+    /// uploaded) survives. `release_surface`/`rebuild_surface` swap this
+    /// out without disturbing the context.
+    surface: RefCell<ffi::types::EGLSurface>,
     context: ffi::types::EGLContext,
+    /// Retained so that a replacement surface can be created with the
+    /// same configuration the context was created against; EGL requires
+    /// the surface and context configs to be compatible.
+    config: ffi::types::EGLConfig,
 }
 
 impl Drop for GlState {
@@ -97,8 +108,11 @@ impl Drop for GlState {
                 ffi::NO_SURFACE,
                 ffi::NO_CONTEXT,
             );
-            self.connection
-                .DestroySurface(self.connection.display, self.surface);
+            let surface = *self.surface.borrow();
+            if surface != ffi::NO_SURFACE {
+                self.connection
+                    .DestroySurface(self.connection.display, surface);
+            }
             self.connection
                 .DestroyContext(self.connection.display, self.context);
         }
@@ -360,9 +374,22 @@ impl EglWrapper {
                 .as_ptr(),
             )
         };
+        if !surface.is_null() {
+            return Ok(surface);
+        }
+
+        // EGL_KHR_gl_colorspace is not universally available; some Android
+        // GLES drivers reject the attribute outright. Retry without it rather
+        // than failing the whole configuration.
+        let err = self.error("EGL CreateWindowSurface");
+        let surface = unsafe {
+            self.egl
+                .CreateWindowSurface(display, config, window, [ffi::NONE as i32].as_ptr())
+        };
         if surface.is_null() {
-            Err(self.error("EGL CreateWindowSurface"))
+            Err(err)
         } else {
+            log::trace!("created window surface without an explicit colorspace");
             Ok(surface)
         }
     }
@@ -469,7 +496,9 @@ impl GlState {
             // with the mesa environment set, and if we did, it would just
             // cause us to try software mode instead of the native opengl
             // drivers we'd pick up from the WGL fallback.
-            if cfg!(windows) || cfg!(target_os = "macos") {
+            // Android's EGL is not Mesa either, so LIBGL_ALWAYS_SOFTWARE means
+            // nothing there and a second pass would just repeat the failure.
+            if cfg!(windows) || cfg!(target_os = "macos") || cfg!(target_os = "android") {
                 break;
             }
             if prefer_swrast {
@@ -649,11 +678,71 @@ impl GlState {
             return Ok(Self {
                 connection: Rc::clone(connection),
                 context,
-                surface,
+                surface: RefCell::new(surface),
+                config,
             });
         }
 
         Err(anyhow!(errors))
+    }
+
+    /// True while this state has no window surface bound, i.e. between a
+    /// `release_surface` and the matching `rebuild_surface`. Rendering must
+    /// be suppressed while this holds.
+    pub fn is_surfaceless(&self) -> bool {
+        *self.surface.borrow() == ffi::NO_SURFACE
+    }
+
+    /// Detach and destroy the window surface, leaving the context and every
+    /// GL object it owns intact. Used when the underlying native window is
+    /// going away but the application is not.
+    pub fn release_surface(&self) {
+        let mut surface = self.surface.borrow_mut();
+        if *surface == ffi::NO_SURFACE {
+            return;
+        }
+        unsafe {
+            self.connection.MakeCurrent(
+                self.connection.display,
+                ffi::NO_SURFACE,
+                ffi::NO_SURFACE,
+                ffi::NO_CONTEXT,
+            );
+            self.connection.DestroySurface(self.connection.display, *surface);
+        }
+        *surface = ffi::NO_SURFACE;
+    }
+
+    /// Create a replacement window surface for `window` and make it current.
+    /// The surface is created against the same EGLConfig the context was
+    /// created with, so the context does not need to be recreated and its
+    /// textures survive.
+    pub fn rebuild_surface(&self, window: ffi::EGLNativeWindowType) -> anyhow::Result<()> {
+        self.release_surface();
+
+        let new_surface = self.connection.egl.create_window_surface(
+            self.connection.display,
+            self.config,
+            window,
+        )?;
+        *self.surface.borrow_mut() = new_surface;
+
+        unsafe {
+            if self.connection.MakeCurrent(
+                self.connection.display,
+                new_surface,
+                new_surface,
+                self.context,
+            ) == 0
+            {
+                return Err(self.connection.egl.error("MakeCurrent after rebuild_surface"));
+            }
+            // Match the swap interval requested at creation time; this is
+            // per-surface state, so it has to be re-applied.
+            self.connection.egl.egl.SwapInterval(self.connection.display, 0);
+        }
+
+        Ok(())
     }
 }
 
@@ -663,10 +752,13 @@ unsafe impl glium::backend::Backend for GlState {
     }
 
     fn swap_buffers(&self) -> Result<(), glium::SwapBuffersError> {
-        let res = unsafe {
-            self.connection
-                .SwapBuffers(self.connection.display, self.surface)
-        };
+        let surface = *self.surface.borrow();
+        if surface == ffi::NO_SURFACE {
+            // No window to present to; treat as an already-consumed frame
+            // rather than a lost context, because the context is still good.
+            return Err(glium::SwapBuffersError::AlreadySwapped);
+        }
+        let res = unsafe { self.connection.SwapBuffers(self.connection.display, surface) };
         if res != 1 {
             Err(match unsafe { self.connection.GetError() } as u32 {
                 ffi::CONTEXT_LOST => glium::SwapBuffersError::ContextLost,
@@ -683,13 +775,18 @@ unsafe impl glium::backend::Backend for GlState {
     }
 
     fn get_framebuffer_dimensions(&self) -> (u32, u32) {
+        let surface = *self.surface.borrow();
+        if surface == ffi::NO_SURFACE {
+            return (0, 0);
+        }
+
         let mut width = 0;
         let mut height = 0;
 
         unsafe {
             self.connection.QuerySurface(
                 self.connection.display,
-                self.surface,
+                surface,
                 ffi::WIDTH as i32,
                 &mut width,
             );
@@ -697,7 +794,7 @@ unsafe impl glium::backend::Backend for GlState {
         unsafe {
             self.connection.QuerySurface(
                 self.connection.display,
-                self.surface,
+                surface,
                 ffi::HEIGHT as i32,
                 &mut height,
             );
@@ -710,12 +807,16 @@ unsafe impl glium::backend::Backend for GlState {
     }
 
     unsafe fn make_current(&self) {
-        if self.connection.MakeCurrent(
-            self.connection.display,
-            self.surface,
-            self.surface,
-            self.context,
-        ) == 0
+        let surface = *self.surface.borrow();
+        if surface == ffi::NO_SURFACE {
+            // Nothing to bind to. Leaving the context unbound is the correct
+            // behaviour here; callers must not draw while surfaceless.
+            return;
+        }
+        if self
+            .connection
+            .MakeCurrent(self.connection.display, surface, surface, self.context)
+            == 0
         {
             let err = self.connection.egl.error("MakeCurrent");
             log::error!("make_current failed {:?} {:?}", self, err);

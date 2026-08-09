@@ -680,6 +680,11 @@ impl Default for FontLocatorSelection {
             FontLocatorSelection::Gdi
         } else if cfg!(target_os = "macos") {
             FontLocatorSelection::CoreText
+        } else if cfg!(target_os = "android") {
+            // Android has no fontconfig. This is a stopgap that sees only the
+            // vendored fonts and any configured font_dirs; see the Android
+            // font locator for the real system font source.
+            FontLocatorSelection::ConfigDirsOnly
         } else {
             FontLocatorSelection::FontConfig
         }

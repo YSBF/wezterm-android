@@ -67,7 +67,7 @@ windows = { workspace=true, features = [
 ]}
 winreg.workspace = true
 
-[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
 dirs-next.workspace = true
 filedescriptor.workspace = true
 futures-lite.workspace = true
@@ -87,6 +87,18 @@ wayland-protocols = {workspace=true, optional=true}
 wayland-protocols-plasma = {workspace=true, optional=true}
 wayland-client = {workspace=true, optional=true}
 wayland-egl = {workspace=true, optional=true}
+
+[target.'cfg(target_os="android")'.dependencies]
+android-activity.workspace = true
+dirs-next.workspace = true
+filedescriptor.workspace = true
+futures-lite.workspace = true
+futures-util.workspace = true
+jni.workspace = true
+libc.workspace = true
+ndk.workspace = true
+ndk-context.workspace = true
+ndk-sys.workspace = true
 
 [target.'cfg(target_os="macos")'.dependencies]
 cgl.workspace = true

@@ -40,8 +40,15 @@ wezterm-input-types.workspace = true
 wezterm-term = { workspace=true, features=["use_serde"] }
 wezterm-toast-notification.workspace = true
 
-[target.'cfg(any(target_os = "android", all(unix, not(target_os = "macos"))))'.dependencies]
+# Android is deliberately excluded: it has no fontconfig, and
+# deps/fontconfig/build.rs silently succeeds when pkg-config finds nothing, so
+# including it here fails at link time with undefined Fc* symbols rather than at
+# build-script time. See wezterm-font/src/locator/android.rs for the replacement.
+[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
 fontconfig.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+xml-rs.workspace = true
 
 [target."cfg(windows)".dependencies]
 dwrote.workspace = true

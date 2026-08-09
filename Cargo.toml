@@ -34,6 +34,7 @@ opt-level = 3
 
 [workspace.dependencies]
 ahash = "0.8"
+android-activity = { version = "0.6", features = ["game-activity"] }
 anyhow = "1.0"
 assert_fs = "1.0.4"
 async-channel = "2.3"
@@ -120,6 +121,7 @@ human-sort = "0.2"
 humansize = "2.1"
 humantime = "2.1"
 image = "0.25"
+jni = "0.21"
 intrusive-collections = "0.9"
 k9 = "0.12.0"
 lazy_static = "1.4"
@@ -144,6 +146,9 @@ mlua = "0.9"
 mux = { path = "mux" }
 mux-lua = { path = "lua-api-crates/mux" }
 names = { version = "0.12", default-features = false }
+ndk = "0.9"
+ndk-context = "0.1"
+ndk-sys = "0.6"
 nix = "0.29"
 notify = "5.0.0"
 ntapi = "0.4"
