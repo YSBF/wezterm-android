@@ -72,10 +72,53 @@ fn run(dirs: &AndroidDirs) -> anyhow::Result<()> {
         dirs.config.display()
     );
 
-    let opts = crate::StartCommand::default();
-    let res = crate::run_terminal_gui(opts, None);
+    let opts = start_command(&config);
+    let default_domain = opts.domain.clone();
+    let res = crate::run_terminal_gui(opts, default_domain);
     wezterm_blob_leases::clear_storage();
     res
+}
+
+/// Build the equivalent of the command line the desktop binary would have
+/// parsed.
+///
+/// `always_new_process` is unconditional. On the desktop, a second `wezterm`
+/// invocation looks for an already-running GUI over a unix socket and hands
+/// the request to it. On Android there is only ever one process, and the
+/// socket lives in the app's private runtime directory where nothing else can
+/// reach it, so that discovery could only ever find itself.
+///
+/// When `default_domain` names a remote domain, this reproduces what
+/// `wezterm connect <name>` does on the desktop. That matters because
+/// `attach` is what makes the mux client adopt the panes that already exist on
+/// the server, rather than opening an empty window beside them -- which is the
+/// whole point of running a mux client on a phone.
+fn start_command(config: &config::ConfigHandle) -> crate::StartCommand {
+    let domain = config
+        .default_domain
+        .as_deref()
+        .filter(|name| is_remote_domain(config, name))
+        .map(|name| name.to_string());
+
+    crate::StartCommand {
+        always_new_process: true,
+        attach: domain.is_some(),
+        domain,
+        ..Default::default()
+    }
+}
+
+/// True when `name` refers to a domain served by another process, whether over
+/// ssh, TLS or a unix socket.
+fn is_remote_domain(config: &config::ConfigHandle, name: &str) -> bool {
+    config
+        .ssh_domains
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|d| d.name == name)
+        || config.tls_clients.iter().any(|d| d.name == name)
+        || config.unix_domains.iter().any(|d| d.name == name)
 }
 
 /// Where wezterm's per-user state lives on this device.
