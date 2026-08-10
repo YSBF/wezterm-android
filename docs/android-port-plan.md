@@ -1,12 +1,12 @@
 # Android GUI port plan
 
-Status: **all phases implemented; nothing has been run on a device.**
+Status: **all phases implemented and run on a device.**
 
-Every phase below is written and cross-compiles, and the cdylib links for
-`aarch64-linux-android` against nothing but Android-native libraries. What has
-*not* happened is a single execution: no device was available, so the exit
-criteria stated per phase are unverified. Treat the code as a starting point
-for a `logcat` session, not as working software. See "What remains" at the end.
+Every phase below is written, cross-compiles, and has now been exercised on a
+Xiaomi phone running Android 15 (MIUI, `aarch64`, 1080x2400). The per-phase
+exit criteria below were written before any of it had run; what actually
+happened on the device, including the six bugs it turned up, is recorded under
+"What the device changed" and "What remains" at the end.
 
 The goal is a native Android GUI backend for wezterm — a fourth sibling to
 `x11`, `wayland`, `macos` and `windows` under `window/src/os/` — reusing the
@@ -216,8 +216,9 @@ downstream embedding of the crate.
 
 ## Phased plan
 
-Every phase is implemented. The exit criteria are stated as originally written
-and remain **unverified**, because nothing has been run on a device.
+Every phase is implemented, and every exit criterion below has now been met on
+a device. They are stated as originally written; the fixes the device forced
+are listed under "What the device changed".
 
 ### Phase 0 — cross-compile and link ✅
 
@@ -249,7 +250,7 @@ For development that is reachable with `adb shell run-as`. A scoped-storage or
 SAF import flow, or an in-app editor, is still needed before this is usable by
 anyone who is not holding a USB cable — that is unbuilt.
 
-Exit criterion (unverified): APK installs and launches to a blank surface, and
+Exit criterion (verified): APK installs and launches to a blank surface, and
 gets past config initialisation.
 
 ### Phase 2 — EGL surface and first frame ✅
@@ -261,7 +262,7 @@ gets past config initialisation.
 `enable_opengl` waits for the first `InitWindow` rather than failing, because
 `TermWindow::new` may reach it before Android has produced a surface.
 
-Exit criterion (unverified): the tab bar and a cell grid render on screen.
+Exit criterion (verified): the tab bar and a cell grid render on screen.
 
 ### Phase 3 — lifecycle and surface loss ✅
 
@@ -281,7 +282,7 @@ invalidation-driven painting. The spawn queue signals a pipe rather than the
 `ALooper`, so a watcher thread translates pipe readability into wakeups; that
 is less invasive than teaching `window/src/spawn.rs` about Android.
 
-Exit criterion (unverified): rotate the device and switch apps briefly —
+Exit criterion (verified): rotate the device and switch apps briefly —
 rendering resumes on the recreated surface.
 
 ### Phase 4 — process lifetime, PTY, and exec ✅
@@ -309,7 +310,7 @@ done, so today the terminal runs whatever toybox provides in `/system/bin`.
 Reusing an installed Termux prefix remains not viable; `android/README.md`
 records why, so that nobody spends time on it again.
 
-Exit criterion (unverified): an interactive shell in a pane, correct on resize.
+Exit criterion (verified): an interactive shell in a pane, correct on resize.
 
 ### Phase 5 — input ✅
 
@@ -367,35 +368,77 @@ discovery socket lives where nothing else can reach it.
 `CODEC_VERSION` stays in sync by construction, since the app and the mux server
 build from the same tree.
 
+## What the device changed
+
+What was verified working: the environment bootstrap, config loading, EGL and
+GL rendering, the Android system-font locator, glyph rendering, pty spawn, key
+input, IME text, the pty tracking the window (46x52 on this phone), the tab
+bar, all twelve extra-row keys with their latches, tap, drag-scroll,
+long-press selection, the clipboard round trip, rotation, surface loss and
+restore across backgrounding, and the `MuxService` keeping the process and its
+shells alive under a foreground notification.
+
+Six things it broke, each now fixed:
+
+- **The cdylib would not load.** Nineteen undefined `egl*` symbols, because
+  the generated bindings declare the entry points rather than dlsym-ing them.
+  `libEGL` has to be on the link line.
+- **Insets are not optional.** targetSdk 35 enforces edge-to-edge, so
+  `setDecorFitsSystemWindows(true)` does nothing and the status bar sat on the
+  tab bar. The Activity consumes the insets and pads the content view itself.
+- **The pty stayed at 24x80** while the window painted at full size. Waiting
+  for the surface before building the window fixed the size but silenced the
+  announcement of it, since `resized` only speaks on a change; the size is now
+  dispatched explicitly.
+- **The extra keys row overflowed and was invisible.** `min_width` is a
+  minimum, so equal shares did not hold the wider labels, and the keys were
+  painted the same grey as the row behind them.
+- **The first prompt was eaten on every launch.** Two independent causes: a
+  cursor at the start of its own line was pulled onto the line above by
+  `rewrap_lines`, so the next write landed on top of it; and mksh erases its
+  prompt when the width changes under it, which on Android happens at every
+  startup because the pane is spawned at `initial_cols` and immediately
+  resized. The first is a terminal bug that any platform can hit and now has a
+  regression test; the second is avoided by measuring the surface and
+  presizing the first pane.
+- **The extra keys row vanished when the soft keyboard came up.** It was only
+  rebuilt on config changes, so after a resize the cached row was drawn at the
+  old geometry, off the bottom of the shrunken surface.
+
+Two notes for anyone debugging on similar hardware. MIUI drops app log output
+almost entirely, so `adb logcat` shows the framework's lines about the process
+and none of wezterm's own; the shell itself, writing to a file under the app's
+data dir, turned out to be the reliable instrument. And MIUI refuses
+`adb install`, so `adb push` plus `pm install -r -t` is the way in.
+
 ## What remains
 
-**Run it.** Everything above is unverified. The cheapest next step is unchanged
-from the original plan and is now much more likely to get somewhere: install
-the APK, `adb logcat`, and work through whatever assertion fires first. The
-environment bootstrap logs its resolved paths at info level on the way up.
-
-Specifically unbuilt or unvalidated:
-
+- **Back quits without asking.** The Activity finishes, `android_main`
+  returns, and the process exits with every pane in it — the `MuxService`
+  does not save it, because the service dies with the process. Backgrounding
+  with Home is safe; Back is not. It should either be ignored, sent to the
+  pane, or confirmed.
+- **Pinch-to-zoom is unverified.** `adb` cannot synthesise a second finger, so
+  the pinch path is the one gesture that was never exercised.
+- **The row is sparse in landscape.** Key widths follow their labels and the
+  remainder becomes margin, which on a 2400px-wide window is a lot of margin.
+  Capping the gap would look better.
 - **No shell is bundled.** Phase 4b's machinery is in place but
   `android/app/src/main/prefix/` is empty. A static bash and busybox have to be
-  built for Android.
+  built for Android. The system mksh works in the meantime.
 - **No way to edit `wezterm.lua` on device** except `adb shell run-as`.
-- **Binary size is unmeasured.** The debug cdylib is ~700 MB. Release + LTO +
+- **Binary size is unmeasured.** The debug APK is 87 MB. Release + LTO +
   stripping has not been measured; vendored fonts and the Lua runtime are not
   small.
 - **Battery and thermals.** Continuous GPU compositing of a terminal is not
   something the desktop backends ever had to economise on. The loop blocks on
   the looper when idle and only spins for fling momentum and long-press
   timing, but this has not been measured.
-- **Insets.** The Activity draws edge to edge, but nothing accounts for the
-  status bar, the navigation bar or a display cutout when laying out the grid.
-- **The soft keyboard covering the terminal.** `adjustResize` is set, and
-  `ContentRectChanged` triggers a resize, but whether the grid ends up the
-  right size with the keyboard up is untested.
-- **Upstream appetite is unknown.** The `egl.rs` surface-swap change and the
-  `effective_bottom_padding` helper touch shared code. Both are small and
-  neither changes behaviour on other platforms, which should help, but this is
-  worth raising in a GitHub Discussion.
+- **Upstream appetite is unknown.** The `egl.rs` surface-swap change, the
+  `effective_bottom_padding` helper and the `rewrap_lines` cursor fix touch
+  shared code. All are small and only the last changes behaviour off Android —
+  where it fixes a bug — which should help, but this is worth raising in a
+  GitHub Discussion.
 
 ## Risks that did not materialise
 
