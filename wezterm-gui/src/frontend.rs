@@ -421,12 +421,22 @@ impl GuiFrontEnd {
                 log::trace!("Creating TermWindow for mux_window_id={}", mux_window_id);
                 if let Err(err) = TermWindow::new_window(mux_window_id).await {
                     log::error!("Failed to create window: {:#}", err);
-                    let mux = Mux::get();
-                    mux.kill_window(mux_window_id);
-                    front_end()
-                        .spawned_mux_window
-                        .borrow_mut()
-                        .remove(&mux_window_id);
+                    // Not on Android: there is one surface, so failing to open
+                    // a second window is the expected answer rather than a
+                    // fault, and killing the mux window would destroy panes
+                    // that are working fine -- including ones adopted from a
+                    // mux server, which live on the other side of the network
+                    // and are not ours to close. Leave it hosted by nothing;
+                    // it stays reachable from the workspace it belongs to.
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let mux = Mux::get();
+                        mux.kill_window(mux_window_id);
+                        front_end()
+                            .spawned_mux_window
+                            .borrow_mut()
+                            .remove(&mux_window_id);
+                    }
                 }
             }
             *front_end().switching_workspaces.borrow_mut() = false;

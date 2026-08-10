@@ -105,6 +105,26 @@ impl Connection {
     where
         F: 'static + FnMut(WindowEvent, &Window),
     {
+        // One window, and only one.
+        //
+        // There is a single `ANativeWindow` -- the Activity's surface -- and an
+        // `EGLSurface` binds it exclusively, so a second window here would be
+        // two `WindowInner`s cloning one surface and fighting over it. Refusing
+        // is not a limitation being imposed so much as one being reported: the
+        // screen holds one terminal.
+        //
+        // The frontend asks for a window per mux window, so this is reachable
+        // whenever something creates a second one -- attaching to a mux server
+        // whose panes are spread across several windows, most plausibly.
+        // `spawn_command` redirects new-window requests to new tabs so that the
+        // local path never gets here.
+        if let Some(existing) = self.windows.borrow().keys().next() {
+            anyhow::bail!(
+                "android has a single window (id {existing}) and it is already \
+                 in use; this mux window has nowhere to be drawn"
+            );
+        }
+
         // Wait for Android to hand us a surface before reporting a size.
         //
         // This runs before the first `InitWindow` in practice, because the
