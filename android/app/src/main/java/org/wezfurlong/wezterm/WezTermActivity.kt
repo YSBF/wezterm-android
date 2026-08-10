@@ -5,10 +5,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.androidgamesdk.GameActivity
 
 /**
@@ -43,9 +46,27 @@ class WezTermActivity : GameActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Draw behind the system bars; the Rust side accounts for insets when
-        // laying out the terminal grid.
+        // Drawing behind the system bars would put the tab bar under the status
+        // clock and the extra-keys row under the gesture bar, and the native
+        // side has no way to read the insets for itself. Asking for the decor
+        // to fit the system windows is not enough: targeting API 35 opts into
+        // Android 15's enforced edge-to-edge, which ignores that request. So
+        // the insets are applied here instead, as padding on the content view
+        // that holds GameActivity's SurfaceView.
+        //
+        // The IME is included so that the terminal is resized to sit above the
+        // soft keyboard rather than behind it.
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        val content = findViewById<View>(android.R.id.content)
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            val pad = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime(),
+            )
+            view.setPadding(pad.left, pad.top, pad.right, pad.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
 
         // A terminal is often watched rather than touched -- a running build,
         // a tailed log -- so do not let the screen blank while it is visible.
