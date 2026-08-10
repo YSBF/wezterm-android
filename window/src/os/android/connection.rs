@@ -45,6 +45,8 @@ pub struct Connection {
     should_terminate: Cell<bool>,
     next_window_id: Cell<usize>,
     waker: AndroidAppWaker,
+    /// Tasks parked until Android hands us the first `ANativeWindow`.
+    first_window_waiters: RefCell<Vec<promise::Promise<()>>>,
     /// Character maps, keyed by input device id. Looking one up costs a JNI
     /// round trip, so they are cached for the life of the connection.
     key_maps: RefCell<HashMap<i32, Option<KeyCharacterMap>>>,
@@ -65,6 +67,7 @@ impl Connection {
             should_terminate: Cell::new(false),
             next_window_id: Cell::new(1),
             waker,
+            first_window_waiters: RefCell::new(vec![]),
             key_maps: RefCell::new(HashMap::new()),
         })
     }
@@ -98,6 +101,22 @@ impl Connection {
     where
         F: 'static + FnMut(WindowEvent, &Window),
     {
+        // Wait for Android to hand us a surface before reporting a size.
+        //
+        // This runs before the first `InitWindow` in practice, because the
+        // task that creates the window is queued before the message loop
+        // starts and the loop drains the spawn queue before it polls. Without
+        // the wait the window is born 0x0, which is a terminal with no rows:
+        // the shell's first prompt is written into a screen that cannot hold
+        // it and is gone by the time the real size arrives.
+        if self.app.native_window().is_none() {
+            let mut promise = promise::Promise::new();
+            let future = promise.get_future().unwrap();
+            self.first_window_waiters.borrow_mut().push(promise);
+            log::debug!("new_window: waiting for the first ANativeWindow");
+            future.await?;
+        }
+
         // The requested geometry is ignored: the activity dictates the size,
         // and there is nowhere for a smaller window to live.
         let window_id = self.next_window_id.get();
@@ -150,6 +169,36 @@ impl Connection {
             .events
             .assign_window(window_handle.clone());
 
+        // Announce the size, because nothing else will.
+        //
+        // The wait above means the surface already exists by the time the
+        // window is built, so it is born with the right dimensions and
+        // `resized` -- which only speaks when they change -- stays silent.
+        // `surface_created` does announce a size, but it only runs for
+        // surfaces that arrive after the window, and this one arrived before.
+        // A frontend that is never told its size keeps the default 24x80 pty
+        // and lays itself out for a window far smaller than the one it is
+        // painting into.
+        //
+        // Deferred rather than dispatched here: the caller is still suspended
+        // inside this function and has not yet stored the `Window` it is about
+        // to be handed, so a handler that ran now would find a half-built
+        // frontend.
+        promise::spawn::spawn_into_main_thread(async move {
+            let Some(inner) = Connection::get().and_then(|conn| conn.window_by_id(window_id)) else {
+                return;
+            };
+            let mut inner = inner.borrow_mut();
+            let dimensions = inner.dimensions;
+            let window_state = inner.window_state;
+            inner.events.dispatch(WindowEvent::Resized {
+                dimensions,
+                window_state,
+                live_resizing: false,
+            });
+        })
+        .detach();
+
         Ok(window_handle)
     }
 
@@ -173,11 +222,16 @@ impl Connection {
         log::trace!("MainEvent {event:?}");
         match event {
             MainEvent::InitWindow { .. } => match self.app.native_window() {
-                Some(native_window) => self.with_windows(|inner| {
-                    if let Err(err) = inner.surface_created(native_window.clone()) {
-                        log::error!("failed to bind to the new ANativeWindow: {err:#}");
+                Some(native_window) => {
+                    self.with_windows(|inner| {
+                        if let Err(err) = inner.surface_created(native_window.clone()) {
+                            log::error!("failed to bind to the new ANativeWindow: {err:#}");
+                        }
+                    });
+                    for mut promise in self.first_window_waiters.borrow_mut().drain(..) {
+                        promise.ok(());
                     }
-                }),
+                }
                 None => log::warn!("InitWindow with no native window"),
             },
 
@@ -471,9 +525,19 @@ impl ConnectionOps for Connection {
     }
 
     fn default_dpi(&self) -> f64 {
-        // Android reports density in dpi directly; 160 is the baseline at
-        // which one dp equals one pixel.
-        self.app.config().density().unwrap_or(160) as f64
+        // Android reports the screen's density in dpi, and handing that
+        // straight to wezterm is physically correct but unusable: `font_size`
+        // is in points, so 12pt on a 440dpi phone is a 73 pixel cell, which is
+        // the same physical size as 12pt on a 96dpi monitor and leaves room
+        // for fourteen columns.
+        //
+        // Scale it so that a point behaves as Android's `sp` does instead --
+        // 1dp is 1/160 inch and 1pt is 1/72 inch, so the conversion is
+        // 72/160. A `font_size` of 12 then means what 12sp means in every
+        // other app on the device, and the same config file gives a sensible
+        // result on both a phone and a desktop.
+        const DP_PER_POINT: f64 = 72. / 160.;
+        self.app.config().density().unwrap_or(160) as f64 * DP_PER_POINT
     }
 
     fn get_appearance(&self) -> Appearance {
