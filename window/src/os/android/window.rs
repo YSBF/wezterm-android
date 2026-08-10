@@ -155,32 +155,7 @@ impl WindowInner {
             return;
         }
         self.has_focus = focused;
-        self.update_soft_keyboard(focused);
         self.events.dispatch(WindowEvent::FocusChanged(focused));
-    }
-
-    /// Raise the soft keyboard when the terminal takes focus, unless the
-    /// device has a physical keyboard attached.
-    ///
-    /// A terminal is always accepting text, so there is no "tap to edit" step
-    /// for the user to perform; leaving the keyboard down would just look
-    /// broken. Devices with a real keyboard are left alone because raising the
-    /// soft one there would cover the terminal for no reason.
-    fn update_soft_keyboard(&mut self, focused: bool) {
-        let app = match super::app::try_android_app() {
-            Some(app) => app,
-            None => return,
-        };
-
-        if has_physical_keyboard(app) {
-            return;
-        }
-
-        if focused {
-            app.show_soft_input(true);
-        } else {
-            app.hide_soft_input(true);
-        }
     }
 
     pub(crate) fn enable_opengl(&mut self) -> anyhow::Result<Rc<glium::backend::Context>> {
@@ -311,13 +286,19 @@ impl WindowInner {
         };
 
         // Diff against the previous committed buffer. GameTextInput keeps a
-        // persistent buffer, so we only want the newly appended tail; if the
-        // user deleted text the buffer shrinks and we send nothing (backspace
-        // arrives separately as a keycode).
+        // persistent buffer, so ordinary typing shows up as a newly appended
+        // tail. A *shrinking* buffer is how backspace reaches us: while the
+        // IME holds an input connection it consumes KEYCODE_DEL itself and
+        // calls deleteSurroundingText, so no key event is ever delivered.
         let new_text = if committed.starts_with(&self.last_ime_text) {
             committed[self.last_ime_text.len()..].to_string()
         } else if self.last_ime_text.starts_with(&committed) {
-            String::new()
+            let deleted = self.last_ime_text[committed.len()..].chars().count();
+            self.last_ime_text = committed;
+            for _ in 0..deleted {
+                self.send_ime_char('\u{8}');
+            }
+            return self.advise_composing(state, composing);
         } else {
             // The buffer was replaced wholesale (autocorrect, suggestion
             // pick). Send the whole thing rather than trying to be clever.
@@ -326,16 +307,36 @@ impl WindowInner {
         self.last_ime_text = committed;
 
         for c in new_text.chars() {
-            self.events.dispatch(WindowEvent::KeyEvent(KeyEvent {
-                key: wezterm_input_types::KeyCode::Char(c),
-                modifiers: Modifiers::NONE,
-                leds: KeyboardLedStatus::empty(),
-                repeat_count: 1,
-                key_is_down: true,
-                raw: None,
-            }));
+            // With a multi-line editor the enter key inserts a newline rather
+            // than firing an editor action, but a terminal expects carriage
+            // return from the enter key.
+            self.send_ime_char(if c == '\n' { '\r' } else { c });
         }
 
+        self.advise_composing(state, composing);
+    }
+
+    /// Deliver one character that arrived through the IME. Such an event
+    /// carries no modifier information at all -- that is what the extra-keys
+    /// row exists to supply.
+    fn send_ime_char(&mut self, c: char) {
+        self.events.dispatch(WindowEvent::KeyEvent(KeyEvent {
+            key: wezterm_input_types::KeyCode::Char(c),
+            modifiers: Modifiers::NONE,
+            leds: KeyboardLedStatus::empty(),
+            repeat_count: 1,
+            key_is_down: true,
+            raw: None,
+        }));
+    }
+
+    /// Report the provisional text inside the composing region so that the
+    /// renderer can show it in place, the same way a dead key is shown.
+    fn advise_composing(
+        &mut self,
+        state: &android_activity::input::TextInputState,
+        composing: Option<(usize, usize)>,
+    ) {
         let status = match composing {
             Some((start, end)) => {
                 DeadKeyStatus::Composing(char_boundary_slice(&state.text, start, end).to_string())
@@ -351,6 +352,7 @@ impl WindowInner {
     pub(crate) fn reset_ime_state(&mut self) {
         self.last_ime_text.clear();
         if let Ok(app) = super::app::android_app() {
+            configure_ime_editor(app);
             app.set_text_input_state(android_activity::input::TextInputState {
                 text: String::new(),
                 selection: android_activity::input::TextSpan { start: 0, end: 0 },
@@ -385,20 +387,29 @@ fn char_boundary_slice(s: &str, start: usize, end: usize) -> &str {
     &s[start..end]
 }
 
-/// True when a hardware keyboard is attached and usable.
+/// Tell the IME what kind of editor it is talking to.
 ///
-/// `Keyboard::NoKeys` covers the ordinary phone case. A device with a physical
-/// keyboard that is currently folded away reports the keyboard but also
-/// reports its keys as hidden, and in that state the soft keyboard is still
-/// wanted.
-fn has_physical_keyboard(app: &android_activity::AndroidApp) -> bool {
-    use ndk::configuration::{Keyboard, KeysHidden};
+/// The default GameTextInput editor is single-line with `IME_ACTION_DONE`,
+/// which means the enter key fires an editor action and is never seen by the
+/// app at all -- fatal for a terminal. Asking for a multi-line editor with no
+/// action makes enter insert a newline into the buffer instead, which the
+/// diff in `text_input_state_changed` turns back into a keypress.
+///
+/// Suggestions and auto-correct are turned off for the same reason a password
+/// field turns them off: the IME rewriting what was typed is never wanted, and
+/// a shell command line is not prose.
+fn configure_ime_editor(app: &android_activity::AndroidApp) {
+    use android_activity::input::{ImeOptions, InputType, TextInputAction};
 
-    let config = app.config();
-    match config.keyboard() {
-        Keyboard::NoKeys | Keyboard::Any => false,
-        _ => !matches!(config.keys_hidden(), KeysHidden::Yes | KeysHidden::Soft),
-    }
+    app.set_ime_editor_info(
+        InputType::TYPE_CLASS_TEXT
+            | InputType::TYPE_TEXT_FLAG_MULTI_LINE
+            | InputType::TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+        TextInputAction::None,
+        // IMG_FLAG_NO_EXTRACT_UI is spelled that way by android-activity; the
+        // Android constant is IME_FLAG_NO_EXTRACT_UI.
+        ImeOptions::IME_FLAG_NO_FULLSCREEN | ImeOptions::IMG_FLAG_NO_EXTRACT_UI,
+    );
 }
 
 fn leds_from_meta_state(meta: android_activity::input::MetaState) -> KeyboardLedStatus {
@@ -440,14 +451,53 @@ impl Window {
             .await
     }
 
-    fn with_inner<R, F>(&self, f: F) -> Option<R>
+    /// Run `f` against the window's inner state, on the main thread, once the
+    /// current call stack has unwound.
+    ///
+    /// The deferral is not optional. `WindowOps` methods are routinely called
+    /// from inside an event handler, and that handler is itself running while
+    /// `Connection::with_windows` holds a mutable borrow of this very
+    /// `RefCell` -- so borrowing inline panics with "already mutably borrowed"
+    /// the first time a resize handler asks its window to repaint. Every other
+    /// backend routes through the spawn queue for exactly this reason.
+    fn with_window_inner<R, F>(&self, f: F) -> Future<R>
     where
-        F: FnOnce(&mut WindowInner) -> R,
+        F: FnOnce(&mut WindowInner) -> anyhow::Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let window_id = self.0;
+        let mut promise = Promise::new();
+        let future = promise.get_future().unwrap();
+
+        promise::spawn::spawn_into_main_thread(async move {
+            match Connection::get().and_then(|conn| conn.window_by_id(window_id)) {
+                Some(inner) => {
+                    let mut inner = inner.borrow_mut();
+                    promise.result(f(&mut inner));
+                }
+                None => {
+                    promise.err(anyhow::anyhow!("window {window_id} has been destroyed"));
+                }
+            }
+        })
+        .detach();
+
+        future
+    }
+
+    /// Read the inner state without deferring.
+    ///
+    /// Only for the `raw_window_handle` traits, which are synchronous by
+    /// signature and so have nowhere to defer to. It takes a shared borrow and
+    /// gives up rather than panicking if the window is mid-dispatch.
+    fn try_with_inner<R, F>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&WindowInner) -> R,
     {
         let conn = Connection::get()?;
         let inner = conn.window_by_id(self.0)?;
-        let mut inner = inner.borrow_mut();
-        Some(f(&mut inner))
+        let inner = inner.try_borrow().ok()?;
+        Some(f(&inner))
     }
 }
 
@@ -462,7 +512,7 @@ impl HasDisplayHandle for Window {
 impl HasWindowHandle for Window {
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
         let ptr = self
-            .with_inner(|inner| {
+            .try_with_inner(|inner| {
                 inner
                     .native_window
                     .as_ref()
@@ -551,13 +601,19 @@ impl WindowOps for Window {
     }
 
     fn show(&self) {
-        self.with_inner(|inner| inner.invalidate());
+        self.with_window_inner(|inner| {
+            inner.invalidate();
+            Ok(())
+        });
     }
 
     fn hide(&self) {}
 
     fn close(&self) {
-        self.with_inner(|inner| inner.close());
+        self.with_window_inner(|inner| {
+            inner.close();
+            Ok(())
+        });
     }
 
     /// Android has no cursor to set; a terminal that wants to indicate a
@@ -565,7 +621,10 @@ impl WindowOps for Window {
     fn set_cursor(&self, _cursor: Option<MouseCursor>) {}
 
     fn invalidate(&self) {
-        self.with_inner(|inner| inner.invalidate());
+        self.with_window_inner(|inner| {
+            inner.invalidate();
+            Ok(())
+        });
     }
 
     /// The activity title is not visible while the app is in the foreground,
@@ -581,8 +640,9 @@ impl WindowOps for Window {
     /// the backend how large a cell is, which is what a drag gesture needs in
     /// order to scroll by a whole number of lines.
     fn set_resize_increments(&self, incr: ResizeIncrement) {
-        self.with_inner(move |inner| {
+        self.with_window_inner(move |inner| {
             inner.touch.set_cell_height(incr.y as f64);
+            Ok(())
         });
     }
 
@@ -598,9 +658,10 @@ impl WindowOps for Window {
 
     fn config_did_change(&self, config: &ConfigHandle) {
         let config = config.clone();
-        self.with_inner(move |inner| {
+        self.with_window_inner(move |inner| {
             inner.config = config;
             inner.invalidate();
+            Ok(())
         });
     }
 }

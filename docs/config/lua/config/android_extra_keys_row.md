@@ -32,5 +32,6 @@ keyboard you may prefer to reclaim it:
 config.android_extra_keys_row = false
 ```
 
-Note that the soft keyboard is raised automatically when the terminal takes
-focus, unless a physical keyboard is attached.
+The soft keyboard is never raised automatically; the row's keyboard button is
+what shows and hides it. Turning this row off on a device with no physical
+keyboard therefore leaves no way to bring the soft keyboard up.
