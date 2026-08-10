@@ -38,6 +38,14 @@ fn main() {
     }
     .unwrap();
 
+    if target.contains("android") {
+        // StaticStructGenerator emits `extern "C"` declarations of the real
+        // EGL entry points rather than a table of function pointers, so they
+        // have to be resolved at link time. Without this the cdylib loads
+        // with 19 undefined egl* symbols and dlopen fails outright.
+        println!("cargo:rustc-link-lib=EGL");
+    }
+
     if target.contains("apple") {
         println!("cargo:rustc-link-lib=framework=Carbon");
     }
