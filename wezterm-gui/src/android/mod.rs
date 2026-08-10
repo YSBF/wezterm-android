@@ -173,7 +173,8 @@ fn presize_initial_grid() {
     }
 
     log::info!("presizing the first pane to {cols} columns for a {pixel_width}px window");
-    if let Err(err) = config::set_config_overrides(&[("initial_cols".to_string(), cols.to_string())])
+    if let Err(err) =
+        config::set_config_overrides(&[("initial_cols".to_string(), cols.to_string())])
     {
         log::warn!("cannot presize the first pane: {err:#}");
         return;

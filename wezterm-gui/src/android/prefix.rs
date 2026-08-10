@@ -109,11 +109,7 @@ pub fn populate(home: &Path, native_lib: Option<&Path>) -> Prefix {
         }
     }
 
-    log::info!(
-        "prefix {} has {} commands",
-        bin.display(),
-        commands.len()
-    );
+    log::info!("prefix {} has {} commands", bin.display(), commands.len());
     Prefix { bin, commands }
 }
 
@@ -188,7 +184,11 @@ fn list_applets(program: &Path, list_arg: &str) -> anyhow::Result<Vec<String>> {
 
     let output = Command::new(program).arg(list_arg).output()?;
     if !output.status.success() {
-        anyhow::bail!("{} {list_arg} exited with {}", program.display(), output.status);
+        anyhow::bail!(
+            "{} {list_arg} exited with {}",
+            program.display(),
+            output.status
+        );
     }
 
     Ok(String::from_utf8_lossy(&output.stdout)
