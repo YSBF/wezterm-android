@@ -82,13 +82,20 @@ android {
 
     sourceSets {
         getByName("main") {
-            jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs"))
             // Prebuilt shell and utility binaries, named lib<command>.so and
             // laid out per ABI. The native library directory is the only place
             // an app may both read and execute from since API 29, so this is
             // where a bundled bash or busybox has to go; the Rust side links
             // them to their real names at startup. See android/README.md.
             jniLibs.srcDir("src/main/prefix")
+        }
+        // The cdylib is staged per build type rather than in one shared
+        // directory, so that building both variants cannot have one overwrite
+        // the other's library. See the cargo tasks below.
+        buildTypes.forEach { buildType ->
+            getByName(buildType.name) {
+                jniLibs.srcDir(layout.buildDirectory.dir("rustJniLibs/${buildType.name}"))
+            }
         }
     }
 }
@@ -111,9 +118,17 @@ dependencies {
  * the only tooling required is a Rust toolchain and an NDK. ci/android-env.sh
  * is the single definition of the cross-compile environment and is shared with
  * command-line builds.
+ *
+ * There is one task per build type rather than one shared task that infers the
+ * profile from the requested task names. Inferring it is wrong twice over: a
+ * task name that does not mention the variant (`build`, `assemble`) builds
+ * everything but would pick the debug profile for the release APK too, and
+ * asking for both variants at once would give both APKs whichever profile won.
  */
-val cargoBuild by tasks.registering {
-    description = "Cross-compiles the wezterm cdylib for each configured ABI"
+fun registerCargoBuild(buildType: String, release: Boolean) = tasks.register(
+    "cargoBuild${buildType.replaceFirstChar { it.uppercase() }}",
+) {
+    description = "Cross-compiles the wezterm $buildType cdylib for each configured ABI"
     group = "build"
 
     doLast {
@@ -122,12 +137,10 @@ val cargoBuild by tasks.registering {
         }
 
         val repoRoot = project.rootDir.parentFile
-        val stagingRoot = layout.buildDirectory.dir("rustJniLibs").get().asFile
+        val stagingRoot = layout.buildDirectory.dir("rustJniLibs/$buildType").get().asFile
 
         // Debug builds of the whole GUI are enormous (hundreds of MB per ABI),
-        // which is fine for `adb install` but not for anything else. The
-        // profile follows the Gradle build type.
-        val release = gradle.startParameter.taskNames.any { it.contains("Release") }
+        // which is fine for `adb install` but not for anything else.
         val profileArgs = if (release) listOf("--release") else emptyList()
         val profileDir = if (release) "release" else "debug"
 
@@ -182,8 +195,13 @@ fun sysrootDirFor(abi: String): String = when (abi) {
     else -> throw GradleException("unknown ABI $abi")
 }
 
-tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders>().configureEach {
-    if (name.contains("JniLibFolders")) {
-        dependsOn(cargoBuild)
+android.buildTypes.forEach { buildType ->
+    val name = buildType.name
+    val cargo = registerCargoBuild(name, release = !buildType.isDebuggable)
+    val variant = name.replaceFirstChar { it.uppercase() }
+    tasks.withType<com.android.build.gradle.tasks.MergeSourceSetFolders>().configureEach {
+        if (this.name == "merge${variant}JniLibFolders") {
+            dependsOn(cargo)
+        }
     }
 }
