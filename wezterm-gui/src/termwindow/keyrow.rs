@@ -156,6 +156,12 @@ pub const KEYS: &[KeyRowKey] = &[
 /// screen.
 const HEIGHT_IN_CELLS: f32 = 2.4;
 
+/// Horizontal padding either side of a key's label, in pixels.
+const KEY_PADDING: f32 = 1.;
+
+/// The radius of a key's rounded corners, in cells.
+const KEY_CORNER_CELLS: f32 = 0.25;
+
 impl TermWindow {
     /// The height the extra-keys row occupies, or zero when it is disabled.
     pub fn key_row_pixel_height(&self) -> anyhow::Result<f32> {
@@ -182,14 +188,41 @@ impl TermWindow {
 
         let colors = self.key_row_colors();
 
-        // Distribute the keys evenly across the width rather than sizing them
-        // to their labels, so that the row does not reflow as latches change
-        // and a user's muscle memory for key positions holds.
-        let key_width = self.dimensions.pixel_width as f32 / KEYS.len() as f32;
+        // Size each key to its own label rather than giving every key an equal
+        // share of the width. An equal share is narrower than "SHIFT" and wider
+        // than an arrow, and `min_width` is only a minimum: a key whose label
+        // does not fit grows anyway, so the row overflows the screen and the
+        // labels run into one another.
+        //
+        // Whatever is left over becomes an even margin between the keys, which
+        // both spans the row across the window and keeps the tap targets
+        // visibly apart. The widths depend only on the labels, so the row still
+        // does not reflow as latches are armed and a user's muscle memory for
+        // key positions holds.
+        // The rounded corners add nothing to a key's width: they are drawn
+        // inside the box that `min_width` asks for, eating into the label's
+        // room rather than extending past it. Counting them here instead
+        // reserved space that no key ever occupies, which left the row ending
+        // short of the window edge with every key crowded against the left.
+        let cell_width = metrics.cell_size.width as f32;
+        let occupied_besides_label = 2. * KEY_PADDING;
+        let label_widths: Vec<f32> = KEYS
+            .iter()
+            .map(|key| key.label().chars().count() as f32 * cell_width)
+            .collect();
+
+        let natural: f32 = label_widths
+            .iter()
+            .map(|width| width + occupied_besides_label)
+            .sum();
+        // On a screen too narrow to hold every label the row overflows rather
+        // than shrinking the text, which would be illegible long before it fit.
+        let gap = ((self.dimensions.pixel_width as f32 - natural) / KEYS.len() as f32).max(0.);
 
         let children = KEYS
             .iter()
-            .map(|key| self.build_key(*key, &font, key_width, height))
+            .zip(&label_widths)
+            .map(|(key, label_width)| self.build_key(*key, &font, *label_width, gap, height))
             .collect::<Vec<_>>();
 
         let row = Element::new(&font, ElementContent::Children(children))
@@ -242,6 +275,7 @@ impl TermWindow {
         key: KeyRowKey,
         font: &std::rc::Rc<wezterm_font::LoadedFont>,
         width: f32,
+        gap: f32,
         height: f32,
     ) -> Element {
         let latched = match key {
@@ -261,31 +295,37 @@ impl TermWindow {
             .min_height(Some(Dimension::Pixels(height)))
             .vertical_align(VerticalAlign::Middle)
             .float(Float::None)
+            .margin(BoxDimension {
+                left: Dimension::Pixels(gap / 2.),
+                right: Dimension::Pixels(gap / 2.),
+                top: Dimension::Pixels(0.),
+                bottom: Dimension::Pixels(0.),
+            })
             .padding(BoxDimension {
-                left: Dimension::Pixels(1.),
-                right: Dimension::Pixels(1.),
+                left: Dimension::Pixels(KEY_PADDING),
+                right: Dimension::Pixels(KEY_PADDING),
                 top: Dimension::Pixels(2.),
                 bottom: Dimension::Pixels(2.),
             })
             .border_corners(Some(Corners {
                 top_left: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(KEY_CORNER_CELLS),
+                    height: Dimension::Cells(KEY_CORNER_CELLS),
                     poly: TOP_LEFT_ROUNDED_CORNER,
                 },
                 top_right: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(KEY_CORNER_CELLS),
+                    height: Dimension::Cells(KEY_CORNER_CELLS),
                     poly: TOP_RIGHT_ROUNDED_CORNER,
                 },
                 bottom_left: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(KEY_CORNER_CELLS),
+                    height: Dimension::Cells(KEY_CORNER_CELLS),
                     poly: BOTTOM_LEFT_ROUNDED_CORNER,
                 },
                 bottom_right: SizedPoly {
-                    width: Dimension::Cells(0.25),
-                    height: Dimension::Cells(0.25),
+                    width: Dimension::Cells(KEY_CORNER_CELLS),
+                    height: Dimension::Cells(KEY_CORNER_CELLS),
                     poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                 },
             }))
@@ -369,8 +409,24 @@ impl TermWindow {
         }
     }
 
+    /// The background of an unlatched key.
+    ///
+    /// Derived from the row's own background rather than taken from a config
+    /// colour, because every candidate -- `active_titlebar_bg`, `button_bg` --
+    /// defaults to the same `#333333` as the row itself, which would leave the
+    /// keys invisible and the row looking like a strip of floating labels.
+    /// Nudging towards the text colour keeps the relationship intact whatever
+    /// the theme, including a light one.
     fn key_row_key_bg(&self) -> LinearRgba {
-        self.config.window_frame.active_titlebar_bg.to_linear()
+        let bg = self.config.window_frame.inactive_titlebar_bg.to_linear();
+        let fg = self.key_row_key_fg();
+        const TOWARDS_TEXT: f32 = 0.12;
+        LinearRgba(
+            bg.0 + (fg.0 - bg.0) * TOWARDS_TEXT,
+            bg.1 + (fg.1 - bg.1) * TOWARDS_TEXT,
+            bg.2 + (fg.2 - bg.2) * TOWARDS_TEXT,
+            bg.3,
+        )
     }
 
     fn key_row_key_fg(&self) -> LinearRgba {
