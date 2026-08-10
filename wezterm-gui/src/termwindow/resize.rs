@@ -301,6 +301,11 @@ impl super::TermWindow {
         };
         self.resize_overlays();
         self.invalidate_fancy_tab_bar();
+        // The key row is laid out against the window's pixel size and anchored
+        // to its bottom edge, so a cached one drawn after a resize lands
+        // outside the new surface entirely. Raising the soft keyboard shrinks
+        // the window enough for the row to disappear off the bottom.
+        self.key_row.take();
         self.update_title();
 
         window.set_resize_increments(if self.config.use_resize_increments {
