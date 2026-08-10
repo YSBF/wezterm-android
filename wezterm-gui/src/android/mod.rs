@@ -18,6 +18,7 @@ pub mod prefix;
 
 use android_activity::AndroidApp;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// The Activity calls into this once, on a dedicated native thread.
 pub fn android_main(app: AndroidApp) {
@@ -63,6 +64,8 @@ fn run(dirs: &AndroidDirs) -> anyhow::Result<()> {
     // entirely and the equivalent of a bare `wezterm start` is run.
     config::common_init(None, &[], false)?;
 
+    presize_initial_grid();
+
     let config = config::configuration();
     if let Some(value) = &config.default_ssh_auth_sock {
         std::env::set_var("SSH_AUTH_SOCK", value);
@@ -107,6 +110,106 @@ fn start_command(config: &config::ConfigHandle) -> crate::StartCommand {
         attach: domain.is_some(),
         domain,
         ..Default::default()
+    }
+}
+
+/// Spawn the first pane at the width the window is actually going to have.
+///
+/// The mux creates the first tab -- and with it the pty and the shell -- from
+/// `initial_cols`/`initial_rows`, before any window exists. On the desktop the
+/// window is then opened at a matching pixel size, so the pty it hands over is
+/// already the right shape and is never resized. Android gives the activity
+/// whatever size it likes and ignores what was asked for, so the first thing
+/// that happens to a brand new shell is a resize.
+///
+/// That resize costs the user the first prompt. mksh, which is the shell on
+/// every Android device, redraws its input line when the terminal's width
+/// changes, and a prompt that has been printed but not yet typed into is
+/// erased and not put back. The screen a launch opens on is then blank until
+/// something is typed, which reads as a hung terminal.
+///
+/// Only the width is worth correcting. The redraw is driven by the column
+/// count, so a row count that is merely close costs nothing visible, whereas
+/// computing it here would mean duplicating the tab bar and key row geometry
+/// that `apply_dimensions` owns, and quietly disagreeing with it later.
+///
+/// This overrides `initial_cols` even if the config sets it. On a platform
+/// where the window cannot be opened at a requested size, that setting has
+/// nothing to describe.
+fn presize_initial_grid() {
+    let Some(app) = window::os::android::try_android_app() else {
+        return;
+    };
+    let Some(pixel_width) = wait_for_surface_width(app) else {
+        log::warn!("no ANativeWindow arrived; the first pane may lose its prompt");
+        return;
+    };
+
+    // Matches `Connection::default_dpi`; see the reasoning there.
+    const DP_PER_POINT: f64 = 72. / 160.;
+    let dpi = app.config().density().unwrap_or(160) as f64 * DP_PER_POINT;
+
+    let config = config::configuration();
+    let cell_width = match crate::cell_pixel_dims(&config, dpi) {
+        Ok((width, _height)) if width > 0 => width,
+        Ok(_) => return,
+        Err(err) => {
+            log::warn!("cannot measure the cell to presize the first pane: {err:#}");
+            return;
+        }
+    };
+
+    let context = config::DimensionContext {
+        dpi: dpi as f32,
+        pixel_max: pixel_width as f32,
+        pixel_cell: cell_width as f32,
+    };
+    let padding_left = config.window_padding.left.evaluate_as_pixels(context) as usize;
+    let padding_right = crate::termwindow::resize::effective_right_padding(&config, context);
+
+    let cols = pixel_width.saturating_sub(padding_left + padding_right) / cell_width;
+    if cols == 0 {
+        return;
+    }
+
+    log::info!("presizing the first pane to {cols} columns for a {pixel_width}px window");
+    if let Err(err) = config::set_config_overrides(&[("initial_cols".to_string(), cols.to_string())])
+    {
+        log::warn!("cannot presize the first pane: {err:#}");
+        return;
+    }
+    config::reload();
+}
+
+/// Pump the event loop until Android hands over a surface, and report how wide
+/// it is.
+///
+/// `AndroidApp` only learns about the window from inside `poll_events`, so
+/// this cannot be a plain wait. Draining events here is safe because there is
+/// no window yet for the connection to deliver them to: everything it does
+/// with an event is done to each window it knows about, and it knows about
+/// none until the GUI has started.
+fn wait_for_surface_width(app: &AndroidApp) -> Option<usize> {
+    // Long enough to cover a cold start on a slow device, short enough that a
+    // surface that is never coming does not hold the terminal hostage.
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    let start = Instant::now();
+    loop {
+        match app.native_window() {
+            Some(native_window) => {
+                return match native_window.width() {
+                    width if width > 0 => Some(width as usize),
+                    _ => None,
+                };
+            }
+            None => match DEADLINE.checked_sub(start.elapsed()) {
+                Some(remaining) if !remaining.is_zero() => {
+                    app.poll_events(Some(remaining.min(Duration::from_millis(50))), |_| {});
+                }
+                _ => return None,
+            },
+        }
     }
 }
 
@@ -221,8 +324,12 @@ fn create_dir_ok(path: &Path) -> bool {
 fn native_library_dir() -> Option<PathBuf> {
     let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
     for line in maps.lines() {
-        let path = line.split_once('/')?;
-        let path = format!("/{}", path.1);
+        // Anonymous mappings have no pathname at all; skip them rather than
+        // giving up on the scan.
+        let path = match line.split_once('/') {
+            Some((_, rest)) => format!("/{rest}"),
+            None => continue,
+        };
         if path.ends_with("/libwezterm_gui.so") || path.ends_with("/libmain.so") {
             return Path::new(&path).parent().map(Path::to_path_buf);
         }
