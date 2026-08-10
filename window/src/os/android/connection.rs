@@ -40,7 +40,11 @@ use wezterm_font::FontConfiguration;
 const ANIMATION_TICK: Duration = Duration::from_millis(16);
 
 pub struct Connection {
-    pub(crate) app: &'static AndroidApp,
+    /// A clone of the app registered by the `android_main` that started this
+    /// connection. Held by value because the registration can be replaced by a
+    /// later Activity, so there is no `'static` reference to borrow; the clone
+    /// is a handle to the same Activity and costs nothing to hold.
+    pub(crate) app: AndroidApp,
     windows: RefCell<HashMap<usize, Rc<RefCell<WindowInner>>>>,
     should_terminate: Cell<bool>,
     next_window_id: Cell<usize>,

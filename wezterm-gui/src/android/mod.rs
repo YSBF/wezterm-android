@@ -20,7 +20,14 @@ use android_activity::AndroidApp;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// The Activity calls into this once, on a dedicated native thread.
+/// The Activity calls into this on a dedicated native thread.
+///
+/// Once per Activity, not once per process. Android destroys and recreates the
+/// Activity for any configuration change the manifest does not claim to handle
+/// -- a change to the system font scale, for one -- and the process survives
+/// that, so this can run again. Everything here is written to be entered more
+/// than once: state that belongs to the Activity is replaced, and state that
+/// belongs to the process is set up exactly once.
 pub fn android_main(app: AndroidApp) {
     init_logging();
 
@@ -35,9 +42,11 @@ pub fn android_main(app: AndroidApp) {
     log::info!("environment bootstrapped: {dirs:#?}");
 
     // Hand the app object to the window crate before anything constructs a
-    // Connection.
-    window::os::android::set_android_app(app);
+    // Connection. This replaces the previous Activity's app, if there was one.
+    let generation = window::os::android::set_android_app(app);
 
+    // Thread-local, and this is a new thread every time, so it is not part of
+    // the once-per-process set below.
     config::designate_this_as_the_main_thread();
     config::assign_error_callback(mux::connui::show_configuration_error_message);
 
@@ -50,15 +59,26 @@ pub fn android_main(app: AndroidApp) {
 
     mux::Mux::shutdown();
     crate::frontend::shutdown();
+
+    // Only if a successor Activity has not already registered its own app.
+    window::os::android::clear_android_app(generation);
 }
 
 fn run(dirs: &AndroidDirs) -> anyhow::Result<()> {
-    env_bootstrap::bootstrap();
-    config::lua::add_context_setup_func(window_funcs::register);
-    config::lua::add_context_setup_func(crate::scripting::register);
-    config::lua::add_context_setup_func(crate::stats::register);
+    // Process-wide and not idempotent. A recreated Activity re-enters
+    // `android_main`, and doing these again would register a second copy of
+    // every Lua setup function and install a second stats thread.
+    static PROCESS_INIT: std::sync::Once = std::sync::Once::new();
+    let mut init_result = Ok(());
+    PROCESS_INIT.call_once(|| {
+        env_bootstrap::bootstrap();
+        config::lua::add_context_setup_func(window_funcs::register);
+        config::lua::add_context_setup_func(crate::scripting::register);
+        config::lua::add_context_setup_func(crate::stats::register);
 
-    crate::stats::Stats::init()?;
+        init_result = crate::stats::Stats::init();
+    });
+    init_result?;
 
     // There is no argv on Android, so the desktop clap parsing is skipped
     // entirely and the equivalent of a bare `wezterm start` is run.
@@ -140,7 +160,7 @@ fn presize_initial_grid() {
     let Some(app) = window::os::android::try_android_app() else {
         return;
     };
-    let Some(pixel_width) = wait_for_surface_width(app) else {
+    let Some(pixel_width) = wait_for_surface_width(&app) else {
         log::warn!("no ANativeWindow arrived; the first pane may lose its prompt");
         return;
     };

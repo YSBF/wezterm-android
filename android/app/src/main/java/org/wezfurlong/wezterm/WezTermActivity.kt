@@ -65,6 +65,10 @@ class WezTermActivity : GameActivity() {
                     WindowInsetsCompat.Type.ime(),
             )
             view.setPadding(pad.left, pad.top, pad.right, pad.bottom)
+            // The native side has no way to ask whether the keyboard is up, and
+            // it needs to know: the row's keyboard button has to toggle against
+            // the real state, not against a count of its own presses.
+            nativeSoftKeyboardVisible(insets.isVisible(WindowInsetsCompat.Type.ime()))
             WindowInsetsCompat.CONSUMED
         }
 
@@ -92,6 +96,27 @@ class WezTermActivity : GameActivity() {
             requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
+
+    override fun onDestroy() {
+        // The service exists to stop the system reclaiming this process while
+        // shells are running. Nothing stops it on its own: START_NOT_STICKY
+        // only governs restart after the process dies, so a started foreground
+        // service outlives the Activity, holding a wake lock and an ongoing
+        // notification for a terminal that is gone. It has, in practice, been
+        // taken down with the process; that is the system's choice to make and
+        // not something to depend on.
+        //
+        // Only when the Activity is really going away. onDestroy also runs for
+        // a configuration change that we do not handle in place, and there the
+        // Activity is about to come straight back.
+        if (isFinishing) {
+            stopService(Intent(this, MuxService::class.java))
+        }
+        super.onDestroy()
+    }
+
+    /** Implemented in window/src/os/android/ime.rs. */
+    private external fun nativeSoftKeyboardVisible(visible: Boolean)
 
     private fun startMuxService() {
         val intent = Intent(this, MuxService::class.java)

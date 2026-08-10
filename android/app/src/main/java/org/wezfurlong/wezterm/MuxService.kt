@@ -81,6 +81,11 @@ class MuxService : Service() {
     override fun onDestroy() {
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
+        // Ordinarily the notification goes when the service does, but say so
+        // explicitly: this runs on the way out of the app, and an ongoing
+        // notification for a terminal that has exited is the one thing the
+        // user cannot dismiss by hand.
+        stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 

@@ -268,9 +268,12 @@ impl WindowInner {
         let composing = state
             .compose_region
             .map(|span| {
-                let start = span.start.min(span.end).min(state.text.len());
-                let end = span.start.max(span.end).min(state.text.len());
-                (start, end)
+                let lo = span.start.min(span.end);
+                let hi = span.start.max(span.end);
+                (
+                    utf16_offset_to_byte(&state.text, lo),
+                    utf16_offset_to_byte(&state.text, hi),
+                )
             })
             .filter(|(start, end)| start < end);
 
@@ -278,8 +281,8 @@ impl WindowInner {
         let committed: String = match composing {
             Some((start, end)) => {
                 let mut s = String::with_capacity(state.text.len() - (end - start));
-                s.push_str(char_boundary_slice(&state.text, 0, start));
-                s.push_str(char_boundary_slice(&state.text, end, state.text.len()));
+                s.push_str(&state.text[..start]);
+                s.push_str(&state.text[end..]);
                 s
             }
             None => state.text.clone(),
@@ -338,12 +341,11 @@ impl WindowInner {
         composing: Option<(usize, usize)>,
     ) {
         let status = match composing {
-            Some((start, end)) => {
-                DeadKeyStatus::Composing(char_boundary_slice(&state.text, start, end).to_string())
-            }
+            Some((start, end)) => DeadKeyStatus::Composing(state.text[start..end].to_string()),
             None => DeadKeyStatus::None,
         };
-        self.events.dispatch(WindowEvent::AdviseDeadKeyStatus(status));
+        self.events
+            .dispatch(WindowEvent::AdviseDeadKeyStatus(status));
     }
 
     /// Reset the IME buffer. Called whenever the edit session is restarted so
@@ -352,7 +354,7 @@ impl WindowInner {
     pub(crate) fn reset_ime_state(&mut self) {
         self.last_ime_text.clear();
         if let Ok(app) = super::app::android_app() {
-            configure_ime_editor(app);
+            configure_ime_editor(&app);
             app.set_text_input_state(android_activity::input::TextInputState {
                 text: String::new(),
                 selection: android_activity::input::TextSpan { start: 0, end: 0 },
@@ -372,19 +374,64 @@ impl WindowInner {
 /// Clamp `start`/`end` to char boundaries so that slicing a UTF-8 buffer with
 /// indices that came from Java (which counts UTF-16 code units after
 /// GameTextInput's conversion) cannot panic.
-fn char_boundary_slice(s: &str, start: usize, end: usize) -> &str {
-    let mut start = start.min(s.len());
-    let mut end = end.min(s.len());
-    while start > 0 && !s.is_char_boundary(start) {
-        start -= 1;
+/// Convert a position within `text` from UTF-16 code units to a byte offset.
+///
+/// The two ends of a composing region reach us as Java string indices, which
+/// count UTF-16 code units, but the text they index arrives as UTF-8. Nothing
+/// in between reconciles the two: GameTextInput's Java `State` carries the
+/// `Editable`'s offsets unchanged, its C layer copies them into a struct whose
+/// text is modified UTF-8, and `android-activity` then clamps them against
+/// that string's *byte* length.
+///
+/// For ASCII the units coincide and it never matters, which is why this is
+/// easy to miss. Past the first non-ASCII character the byte offset is the
+/// larger of the two, so an unconverted offset points short of where the IME
+/// meant: the composing region swallows characters to its left that were
+/// already committed, and the diff against the previous buffer then reads as a
+/// deletion and sends backspaces over text the user had finished typing.
+///
+/// An offset landing inside a surrogate pair has no exact answer; it rounds
+/// forward to the next character, and one past the end clamps to the end.
+fn utf16_offset_to_byte(text: &str, utf16_offset: usize) -> usize {
+    if utf16_offset == 0 {
+        return 0;
     }
-    while end < s.len() && !s.is_char_boundary(end) {
-        end += 1;
+    let mut units = 0;
+    for (byte_offset, c) in text.char_indices() {
+        if units >= utf16_offset {
+            return byte_offset;
+        }
+        units += c.len_utf16();
     }
-    if start > end {
-        return "";
+    text.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utf16_offset_to_byte;
+
+    #[test]
+    fn utf16_offsets_become_byte_offsets() {
+        // ASCII: the two agree, which is the case that hides the bug.
+        assert_eq!(utf16_offset_to_byte("abc", 0), 0);
+        assert_eq!(utf16_offset_to_byte("abc", 2), 2);
+
+        // One CJK character is one UTF-16 unit but three UTF-8 bytes, so a
+        // composing region starting after it is at unit 1 and byte 3.
+        let text = "中a";
+        assert_eq!(utf16_offset_to_byte(text, 1), 3);
+        assert_eq!(&text[utf16_offset_to_byte(text, 1)..], "a");
+
+        // An astral character is a surrogate pair: two units, four bytes.
+        let text = "😀x";
+        assert_eq!(utf16_offset_to_byte(text, 2), 4);
+        assert_eq!(&text[utf16_offset_to_byte(text, 2)..], "x");
+        // Splitting the pair rounds forward rather than slicing mid-character.
+        assert_eq!(utf16_offset_to_byte(text, 1), 4);
+
+        // Past the end clamps.
+        assert_eq!(utf16_offset_to_byte("ab", 99), 2);
     }
-    &s[start..end]
 }
 
 /// Tell the IME what kind of editor it is talking to.

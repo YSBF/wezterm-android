@@ -9,15 +9,18 @@
 //! * `window` is the single activity-filling window and its EGL state.
 //! * `keyboard` maps Android keycodes onto wezterm key events.
 //! * `touch` recognises gestures, because a finger is not a mouse.
+//! * `ime` tracks whether the soft keyboard is up.
 //! * `clipboard` is the one part that has to go through JNI.
 
 pub mod app;
 mod clipboard;
 mod connection;
+mod ime;
 mod keyboard;
 mod touch;
 mod window;
 
-pub use app::{android_app, set_android_app, try_android_app};
+pub use app::{android_app, clear_android_app, set_android_app, try_android_app, AppGeneration};
+pub use ime::soft_keyboard_visible;
 pub use connection::Connection;
 pub use window::Window;

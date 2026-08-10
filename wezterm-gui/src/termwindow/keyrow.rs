@@ -465,12 +465,11 @@ fn toggle_soft_keyboard() {
     #[cfg(target_os = "android")]
     {
         if let Some(app) = ::window::os::android::try_android_app() {
-            // GameTextInput has no "is the keyboard up" query, so track the
-            // intended state here rather than asking.
-            use std::sync::atomic::{AtomicBool, Ordering};
-            static SHOWN: AtomicBool = AtomicBool::new(false);
-
-            if SHOWN.fetch_xor(true, Ordering::Relaxed) {
+            // Ask what the keyboard is actually doing rather than remembering
+            // what this button last asked for: the system raises and dismisses
+            // it without going through here, and a latch that only counts
+            // presses ends up inverted and looks broken for one tap.
+            if ::window::os::android::soft_keyboard_visible() {
                 app.hide_soft_input(false);
             } else {
                 app.show_soft_input(false);
