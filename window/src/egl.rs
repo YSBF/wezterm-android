@@ -810,12 +810,22 @@ unsafe impl glium::backend::Backend for GlState {
     }
 
     unsafe fn make_current(&self) {
+        // `surface` is NO_SURFACE between a `release_surface` and the matching
+        // `rebuild_surface`, and there the context is bound with no surfaces
+        // rather than left unbound. Making a context current is not only how
+        // you draw with its objects, it is also how you *delete* them, and
+        // glium deletes from `Drop`: a context that never goes current turns
+        // every one of those drops into a panic, and a panic in a drop that is
+        // already unwinding aborts the process. On Android the whole final
+        // teardown runs surfaceless, because the Activity's surface is
+        // destroyed before the app is torn down. Deleting against a surfaceless
+        // context is valid, and unlike skipping the bind it actually frees the
+        // objects.
+        //
+        // This needs EGL_KHR_surfaceless_context, which is core in EGL 1.5.
+        // Where it is missing the call fails and the context stays unbound,
+        // which is no worse than not having tried.
         let surface = *self.surface.borrow();
-        if surface == ffi::NO_SURFACE {
-            // Nothing to bind to. Leaving the context unbound is the correct
-            // behaviour here; callers must not draw while surfaceless.
-            return;
-        }
         if self
             .connection
             .MakeCurrent(self.connection.display, surface, surface, self.context)
