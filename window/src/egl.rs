@@ -710,7 +710,8 @@ impl GlState {
                 ffi::NO_SURFACE,
                 ffi::NO_CONTEXT,
             );
-            self.connection.DestroySurface(self.connection.display, *surface);
+            self.connection
+                .DestroySurface(self.connection.display, *surface);
         }
         *surface = ffi::NO_SURFACE;
     }
@@ -738,11 +739,17 @@ impl GlState {
                 self.context,
             ) == 0
             {
-                return Err(self.connection.egl.error("MakeCurrent after rebuild_surface"));
+                return Err(self
+                    .connection
+                    .egl
+                    .error("MakeCurrent after rebuild_surface"));
             }
             // Match the swap interval requested at creation time; this is
             // per-surface state, so it has to be re-applied.
-            self.connection.egl.egl.SwapInterval(self.connection.display, 0);
+            self.connection
+                .egl
+                .egl
+                .SwapInterval(self.connection.display, 0);
         }
 
         Ok(())
@@ -761,7 +768,10 @@ unsafe impl glium::backend::Backend for GlState {
             // rather than a lost context, because the context is still good.
             return Err(glium::SwapBuffersError::AlreadySwapped);
         }
-        let res = unsafe { self.connection.SwapBuffers(self.connection.display, surface) };
+        let res = unsafe {
+            self.connection
+                .SwapBuffers(self.connection.display, surface)
+        };
         if res != 1 {
             Err(match unsafe { self.connection.GetError() } as u32 {
                 ffi::CONTEXT_LOST => glium::SwapBuffersError::ContextLost,
