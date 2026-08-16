@@ -348,6 +348,19 @@ three historical formats and of vendor variation, and degrades to plain
 directory enumeration rather than failing. `FontLocatorSelection::Android` is
 the default there.
 
+The locator caches what it parses, and that turned out to matter more than
+anything else in the port. It originally cached only the *paths*, so every
+font resolution re-opened and re-parsed the device's font files -- 288 of them,
+141MB, on the phone this was measured on. Nothing about which file a family
+resolves to depends on the font size, but `change_scaling` drops the resolved
+font cache whenever the scale changes, so each font size step paid for the
+whole scan twice over: once for the terminal font, once for the tab bar's.
+Measured on a debug build, one step cost ~740ms of CPU with 88% of it inside
+`load_fonts`; painting was 7%. Caching the parsed fonts by path took a step to
+under 60ms. The cached entries are shared rather than cloned out, because
+`ParsedFont` memoises its codepoint coverage in place and cloning would throw
+that away on every fallback lookup.
+
 ### Phase 8 — touch ✅
 
 `window/src/os/android/touch.rs` recognises gestures rather than pretending a
@@ -427,9 +440,25 @@ data dir, turned out to be the reliable instrument. And MIUI refuses
   `android/app/src/main/prefix/` is empty. A static bash and busybox have to be
   built for Android. The system mksh works in the meantime.
 - **No way to edit `wezterm.lua` on device** except `adb shell run-as`.
-- **Binary size is unmeasured.** The debug APK is 87 MB. Release + LTO +
-  stripping has not been measured; vendored fonts and the Lua runtime are not
-  small.
+- **Debug builds are the wrong thing to judge speed by, and everything above
+  was.** The release APK is 28 MB against the debug build's 87 MB, and it is
+  roughly 3x faster: a font size step went 740ms -> ~200ms and a scroll gesture
+  410ms -> 160ms purely from the build profile, before any code changed. The
+  `cc`-built FreeType is compiled `-O0` in a dev profile too, so the C side is
+  unoptimised as well. Anything measured on a debug build should be treated as
+  an upper bound.
+- **Scroll cost is not yet accounted for.** With the locator cached, a scroll
+  gesture is the largest remaining cost, and a profile of one is 75% inside
+  `do_paint` with no single hotspot -- flat and diffuse. Whether that is simply
+  what this renderer costs on a phone, or something addressable, has not been
+  established. Note that run-to-run drift is large: the same build measured
+  430ms and 650ms for the same gesture minutes apart, and `scaling_max_freq`
+  on the big core was observed capped at 2.23GHz against a rated 3.19GHz. Any
+  A/B on rendering needs to control for that or it will measure the governor.
+- **Pinch resolution is coarse.** `PINCH_STEP_RATIO` is 1.25 for a 1.1x font
+  step, so fingers must travel 25% to move the font 10%, and doubling the size
+  takes seven steps. Now that a step is cheap this is the thing standing
+  between the gesture and feeling continuous.
 - **Battery and thermals.** Continuous GPU compositing of a terminal is not
   something the desktop backends ever had to economise on. The loop blocks on
   the looper when idle and only spins for fling momentum and long-press

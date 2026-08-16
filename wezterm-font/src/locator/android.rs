@@ -17,11 +17,11 @@
 //! step degrades to "just enumerate the directories" rather than failing.
 
 use crate::locator::{FontDataSource, FontLocator, FontOrigin};
-use crate::parser::{best_matching_font, parse_and_collect_font_info, ParsedFont};
+use crate::parser::{parse_and_collect_font_info, ParsedFont};
 use config::FontAttributes;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Where Android keeps fonts. `/system/fonts` is universal; the others appear
 /// on Treble devices and on some vendor images.
@@ -59,15 +59,37 @@ struct FontEntry {
 }
 
 pub struct AndroidFontLocator {
-    /// The parsed system font list. Built once; scanning the font directories
-    /// and parsing a hundred-odd files is not something to repeat per query.
+    /// The ordered list of font files. Built once, on first use.
     entries: Mutex<Option<Vec<FontEntry>>>,
+    /// What each of those files contains, keyed by path.
+    ///
+    /// Knowing the paths is the cheap half; the expensive half is asking
+    /// freetype what is inside each one, and *that* is what has to be
+    /// remembered. A device carries a couple of hundred font files -- 288 on
+    /// the phone this was measured on, 141MB of them -- and answering a single
+    /// query walks the list until something matches, so parsing per query
+    /// means opening and parsing most of them per query.
+    ///
+    /// It is worth being precise about why that is pure waste. Which file a
+    /// family resolves to does not depend on the font size; only rasterizing
+    /// does. But `FontConfigInner::change_scaling` drops the whole resolved
+    /// font cache whenever the scale changes, so every font size step re-runs
+    /// resolution from scratch -- twice over, once for the terminal font and
+    /// once for the tab bar's. Uncached, one pinch step cost ~800ms, 88% of it
+    /// in here. Cached, the walk stays but becomes a few name comparisons.
+    ///
+    /// The entries are shared rather than cloned out because `ParsedFont`
+    /// computes its codepoint coverage lazily and memoises it in place;
+    /// handing out clones would throw that away and make every fallback
+    /// lookup recompute coverage for every font it considers.
+    parsed: Mutex<HashMap<PathBuf, Arc<Vec<ParsedFont>>>>,
 }
 
 impl AndroidFontLocator {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(None),
+            parsed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -79,6 +101,29 @@ impl AndroidFontLocator {
             cache.replace(entries);
         }
         cache.as_ref().expect("just populated").clone()
+    }
+
+    /// The fonts in `path`, parsing the file the first time it is asked for.
+    ///
+    /// A file that fails to parse caches as empty, so a font the system ships
+    /// but freetype will not read is not re-attempted on every query.
+    fn parsed_fonts(&self, path: &Path) -> Arc<Vec<ParsedFont>> {
+        if let Some(hit) = self.parsed.lock().unwrap().get(path) {
+            return Arc::clone(hit);
+        }
+
+        let source = FontDataSource::OnDisk(path.to_path_buf());
+        let mut fonts = vec![];
+        if let Err(err) = parse_and_collect_font_info(&source, &mut fonts, FontOrigin::FontDirs) {
+            log::trace!("failed to parse {}: {err:#}", path.display());
+        }
+
+        let fonts = Arc::new(fonts);
+        self.parsed
+            .lock()
+            .unwrap()
+            .insert(path.to_path_buf(), Arc::clone(&fonts));
+        fonts
     }
 }
 
@@ -112,21 +157,18 @@ impl FontLocator for AndroidFontLocator {
             let ordered = order_by_family_hint(&entries, &attr.family);
 
             for entry in ordered {
-                let source = FontDataSource::OnDisk(entry.path.clone());
-                let origin = FontOrigin::FontDirs;
+                let fonts = self.parsed_fonts(&entry.path);
+                let named: Vec<&ParsedFont> = fonts
+                    .iter()
+                    .filter(|font| font.matches_name(attr))
+                    .collect();
 
-                match best_matching_font(&source, attr, origin, pixel_size) {
-                    Ok(Some(parsed)) => {
-                        // Prefer the earlier entry when two files match
-                        // equally well: fonts.xml order encodes the vendor's
-                        // own preference.
-                        if best.is_none() {
-                            best.replace(parsed);
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        log::trace!("failed to parse {}: {err:#}", entry.path.display());
+                if let Some(idx) = ParsedFont::best_matching_index(attr, &named, pixel_size) {
+                    // Prefer the earlier entry when two files match equally
+                    // well: fonts.xml order encodes the vendor's own
+                    // preference.
+                    if best.is_none() {
+                        best.replace(named[idx].clone().synthesize(attr));
                     }
                 }
 
@@ -149,11 +191,7 @@ impl FontLocator for AndroidFontLocator {
         let mut fonts = vec![];
 
         for entry in self.entries() {
-            let source = FontDataSource::OnDisk(entry.path.clone());
-            if let Err(err) = parse_and_collect_font_info(&source, &mut fonts, FontOrigin::FontDirs)
-            {
-                log::trace!("failed to parse {}: {err:#}", entry.path.display());
-            }
+            fonts.extend(self.parsed_fonts(&entry.path).iter().cloned());
         }
 
         fonts.sort();
@@ -185,15 +223,10 @@ impl FontLocator for AndroidFontLocator {
             }
 
             for entry in &entries {
-                let source = FontDataSource::OnDisk(entry.path.clone());
-                let mut candidates = vec![];
-                if parse_and_collect_font_info(&source, &mut candidates, FontOrigin::FontDirs)
-                    .is_err()
-                {
-                    continue;
-                }
-
-                for candidate in candidates {
+                // Coverage is computed against the cached fonts, not against
+                // copies of them, so each font pays for that computation once
+                // across the life of the process rather than once per lookup.
+                for candidate in self.parsed_fonts(&entry.path).iter() {
                     match candidate.coverage_intersection(&wanted) {
                         Ok(r) if !r.is_empty() => {
                             log::trace!(
@@ -201,7 +234,7 @@ impl FontLocator for AndroidFontLocator {
                                 c as u32,
                                 candidate.handle.diagnostic_string()
                             );
-                            fonts.push(candidate);
+                            fonts.push(candidate.clone());
                             continue 'next_codepoint;
                         }
                         _ => {}
