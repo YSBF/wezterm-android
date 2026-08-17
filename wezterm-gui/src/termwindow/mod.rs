@@ -83,6 +83,7 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
+pub mod sidebar;
 pub mod spawn;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
@@ -151,12 +152,36 @@ pub enum TermWindowNotif {
         width: usize,
         height: usize,
     },
+    /// The host editor closed with a profile to store.
+    ///
+    /// The editor runs in a native dialog, so its answer arrives long after the
+    /// tap that opened it and cannot be returned from the click handler.
+    HostProfileEdited {
+        profile: crate::hosts::HostProfile,
+        is_new: bool,
+    },
+    /// The reset confirmation was accepted.
+    HostProfilesReset,
+    /// Something for the sidebar to say.
+    SidebarNotice(String),
+}
+
+/// Convert device-independent pixels to device pixels.
+///
+/// On Android the dpi wezterm sees is the screen's density scaled by 72/160, so
+/// that a configured `font_size` in points behaves as `sp` does in every other
+/// app; see `default_dpi` in the Android connection. One point in that space is
+/// therefore exactly one dp, and the points-to-pixels conversion *is* the dp
+/// conversion.
+pub(crate) fn dp(value: f32, dpi: f64) -> f32 {
+    value * dpi as f32 / 72.
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UIItemType {
     TabBar(TabBarItem),
     KeyRow(crate::termwindow::keyrow::KeyRowKey),
+    Sidebar(crate::termwindow::sidebar::SidebarItem),
     CloseTab(usize),
     AboveScrollThumb,
     ScrollThumb,
@@ -413,6 +438,8 @@ pub struct TermWindow {
     /// How far the extra-keys row's panning region has been dragged to the
     /// left, in pixels. Always zero when every key fits across the window.
     key_row_scroll: f32,
+    /// The SSH host sidebar; see sidebar.rs.
+    sidebar: sidebar::Sidebar,
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
@@ -741,6 +768,7 @@ impl TermWindow {
             key_row_modifiers: keyrow::KeyRowModifiers::default(),
             key_row_modifier_pane: None,
             key_row_scroll: 0.,
+            sidebar: sidebar::Sidebar::default(),
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),
@@ -1385,6 +1413,16 @@ impl TermWindow {
             }
             TermWindowNotif::SetInnerSize { width, height } => {
                 self.set_inner_size(window, width, height);
+            }
+            TermWindowNotif::HostProfileEdited { profile, is_new } => {
+                self.host_profile_edited(profile, is_new);
+            }
+            TermWindowNotif::HostProfilesReset => {
+                self.host_profiles_reset();
+            }
+            TermWindowNotif::SidebarNotice(notice) => {
+                self.sidebar.set_notice(Some(notice));
+                window.invalidate();
             }
         }
 

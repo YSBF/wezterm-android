@@ -69,7 +69,7 @@ use crate::termwindow::render::corners::{
     BOTTOM_LEFT_ROUNDED_CORNER, BOTTOM_RIGHT_ROUNDED_CORNER, TOP_LEFT_ROUNDED_CORNER,
     TOP_RIGHT_ROUNDED_CORNER,
 };
-use crate::termwindow::{TermWindow, UIItem, UIItemType};
+use crate::termwindow::{dp, TermWindow, UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{ConfigHandle, Dimension, DimensionContext};
 use window::color::LinearRgba;
@@ -770,17 +770,6 @@ fn group_extent(group: &ComputedElement) -> Option<(f32, f32)> {
         }
         _ => None,
     }
-}
-
-/// Convert device-independent pixels to device pixels.
-///
-/// On Android the dpi wezterm sees is the screen's density scaled by 72/160, so
-/// that a configured `font_size` in points behaves as `sp` does in every other
-/// app; see `default_dpi` in the Android connection. One point in that space is
-/// therefore exactly one dp, and the points-to-pixels conversion is the dp
-/// conversion.
-fn dp(value: f32, dpi: f64) -> f32 {
-    value * dpi as f32 / 72.
 }
 
 /// True when the extra-keys row should be drawn.

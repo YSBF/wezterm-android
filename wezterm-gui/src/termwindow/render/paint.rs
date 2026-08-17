@@ -76,6 +76,9 @@ impl crate::TermWindow {
                         // there makes every pass allocate again and the loop
                         // never terminates.
                         self.key_row.take();
+                        // The sidebar caches an element tree for the same
+                        // reason and loses it to the same hazard.
+                        self.sidebar.invalidate();
 
                         if let Err(err) = result {
                             self.allow_images = match self.allow_images {
@@ -286,6 +289,11 @@ impl crate::TermWindow {
             self.paint_key_row_if_enabled()
                 .context("paint_key_row_if_enabled")?;
         }
+
+        // After the key row and the tab bar, because the drawer is drawn over
+        // both of them.
+        self.paint_sidebar_if_open()
+            .context("paint_sidebar_if_open")?;
 
         self.paint_window_borders(&mut layers)
             .context("paint_window_borders")?;

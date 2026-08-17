@@ -41,6 +41,7 @@ impl super::TermWindow {
             }
             UIItemType::CloseTab(_)
             | UIItemType::KeyRow(_)
+            | UIItemType::Sidebar(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -53,6 +54,7 @@ impl super::TermWindow {
             UIItemType::TabBar(_) => {}
             UIItemType::CloseTab(_)
             | UIItemType::KeyRow(_)
+            | UIItemType::Sidebar(_)
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
@@ -387,6 +389,9 @@ impl super::TermWindow {
             UIItemType::KeyRow(key) => {
                 self.mouse_event_key_row(key, event, context);
             }
+            UIItemType::Sidebar(item) => {
+                self.mouse_event_sidebar(item, event, context);
+            }
         }
     }
 
@@ -491,6 +496,9 @@ impl super::TermWindow {
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Left);
                 }
+                TabBarItem::SidebarButton => {
+                    self.toggle_sidebar();
+                }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
                     let maximized = self
                         .window_state
@@ -544,6 +552,7 @@ impl super::TermWindow {
                 TabBarItem::None
                 | TabBarItem::LeftStatus
                 | TabBarItem::RightStatus
+                | TabBarItem::SidebarButton
                 | TabBarItem::WindowButton(_) => {}
             },
             WMEK::Press(MousePress::Right) => match item {
@@ -556,6 +565,7 @@ impl super::TermWindow {
                 TabBarItem::None
                 | TabBarItem::LeftStatus
                 | TabBarItem::RightStatus
+                | TabBarItem::SidebarButton
                 | TabBarItem::WindowButton(_) => {}
             },
             WMEK::Move => match item {
@@ -574,6 +584,7 @@ impl super::TermWindow {
                 }
                 TabBarItem::WindowButton(_)
                 | TabBarItem::Tab { .. }
+                | TabBarItem::SidebarButton
                 | TabBarItem::NewTabButton { .. } => {}
             },
             WMEK::VertWheel(n) => {

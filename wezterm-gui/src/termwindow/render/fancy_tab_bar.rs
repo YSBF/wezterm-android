@@ -31,6 +31,37 @@ const X_BUTTON: &[Poly] = &[
     },
 ];
 
+/// Three stacked bars: the conventional "menu" affordance.
+///
+/// Drawn rather than set as text because the vendored fonts have no hamburger
+/// glyph and a missing glyph renders as a box.
+const MENU_BUTTON: &[Poly] = &[
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Zero, BlockCoord::Frac(1, 6)),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(1, 6)),
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Zero, BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(1, 2)),
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Zero, BlockCoord::Frac(5, 6)),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(5, 6)),
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+];
+
 const PLUS_BUTTON: &[Poly] = &[
     Poly {
         path: &[
@@ -129,6 +160,42 @@ impl crate::TermWindow {
                     })
                     .border(BoxDimension::new(Dimension::Pixels(0.)))
                     .colors(bar_colors.clone()),
+                TabBarItem::SidebarButton => Element::new(
+                    &font,
+                    ElementContent::Poly {
+                        line_width: metrics.underline_height.max(2),
+                        poly: SizedPoly {
+                            poly: MENU_BUTTON,
+                            width: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
+                            height: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
+                        },
+                    },
+                )
+                .vertical_align(VerticalAlign::Middle)
+                .item_type(UIItemType::TabBar(item.item.clone()))
+                .margin(BoxDimension {
+                    left: Dimension::Cells(0.25),
+                    right: Dimension::Cells(0.25),
+                    top: Dimension::Cells(0.2),
+                    bottom: Dimension::Cells(0.),
+                })
+                .padding(BoxDimension {
+                    left: Dimension::Cells(0.5),
+                    right: Dimension::Cells(0.5),
+                    top: Dimension::Cells(0.2),
+                    bottom: Dimension::Cells(0.25),
+                })
+                .border(BoxDimension::new(Dimension::Pixels(1.)))
+                .colors(ElementColors {
+                    border: BorderColor::default(),
+                    bg: new_tab.bg_color.to_linear().into(),
+                    text: new_tab.fg_color.to_linear().into(),
+                })
+                .hover_colors(Some(ElementColors {
+                    border: BorderColor::default(),
+                    bg: new_tab_hover.bg_color.to_linear().into(),
+                    text: new_tab_hover.fg_color.to_linear().into(),
+                })),
                 TabBarItem::NewTabButton => Element::new(
                     &font,
                     ElementContent::Poly {
@@ -299,7 +366,7 @@ impl crate::TermWindow {
         let num_tabs: f32 = items
             .iter()
             .map(|item| match item.item {
-                TabBarItem::NewTabButton | TabBarItem::Tab { .. } => 1.,
+                TabBarItem::NewTabButton | TabBarItem::SidebarButton | TabBarItem::Tab { .. } => 1.,
                 _ => 0.,
             })
             .sum();

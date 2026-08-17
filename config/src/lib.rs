@@ -838,3 +838,7 @@ fn default_true() -> bool {
 fn default_android_extra_keys_row() -> bool {
     cfg!(target_os = "android")
 }
+
+fn default_android_host_sidebar() -> bool {
+    cfg!(target_os = "android")
+}

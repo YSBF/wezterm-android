@@ -807,6 +807,15 @@ impl mux::sshprompt::SshPrompter for NativeSshPrompter {
     }
 }
 
+/// Hand the exported host list to the platform's share mechanism.
+///
+/// The stored file lives in app-private storage and `run-as` is refused for a
+/// package that is not debuggable, so a share intent is the only route anything
+/// has off the device. It needs no storage permission and no file picker.
+pub fn share_text(document: &str) -> anyhow::Result<()> {
+    window::dialog::share_text("wezterm hosts", document)
+}
+
 /// Send ssh prompts to native dialogs, where there are any.
 pub fn install_ssh_prompter() {
     if !crate::dialog::available() {

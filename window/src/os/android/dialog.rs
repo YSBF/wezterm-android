@@ -163,3 +163,52 @@ pub extern "system" fn Java_org_wezfurlong_wezterm_WezTermActivity_nativeDialogR
     });
     outcome.resolve::<jni::errors::ThrowRuntimeExAndDefault>()
 }
+
+/// Hand text to whatever the user shares things with.
+///
+/// A share intent needs no storage permission and no file picker, which matters
+/// because the app can reach neither: there is no path a user could pick that the
+/// app may write, and asking for one would mean a permission for a feature that
+/// exports a list of host names.
+pub fn share_text(subject: &str, text: &str) {
+    let app = match app::try_android_app() {
+        Some(app) => app,
+        None => {
+            log::error!("share_text: no AndroidApp");
+            return;
+        }
+    };
+
+    let subject = subject.to_string();
+    let text = text.to_string();
+    app.clone().run_on_java_main_thread(Box::new(move || {
+        if let Err(err) = share_text_impl(&app, &subject, &text) {
+            log::error!("failed to share text: {err:#}");
+        }
+    }));
+}
+
+fn share_text_impl(
+    app: &android_activity::AndroidApp,
+    subject: &str,
+    text: &str,
+) -> anyhow::Result<()> {
+    // Safety: android-activity guarantees this pointer is the process JavaVM.
+    let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr().cast()) };
+
+    vm.attach_current_thread(|env| -> anyhow::Result<()> {
+        let activity_raw = app.activity_as_ptr() as jni::sys::jobject;
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_raw) }
+            .map_err(|err| anyhow::anyhow!("casting the activity reference: {err}"))?;
+
+        let subject = env.new_string(subject)?;
+        let text = env.new_string(text)?;
+        env.call_method(
+            activity.as_ref(),
+            jni_str!("shareText"),
+            jni_sig!("(Ljava/lang/String;Ljava/lang/String;)V"),
+            &[JValue::Object(&subject), JValue::Object(&text)],
+        )?;
+        Ok(())
+    })
+}

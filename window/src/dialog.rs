@@ -35,3 +35,19 @@ pub fn request_dialog(_spec: String) -> Future<DialogOutcome> {
 pub fn dialogs_available() -> bool {
     cfg!(target_os = "android")
 }
+
+/// Hand text to the platform's share mechanism.
+///
+/// Android only: it is how anything leaves an app that can reach no directory the
+/// user can see. Elsewhere this reports that there is nothing to share with, and
+/// the caller falls back to the clipboard.
+#[cfg(target_os = "android")]
+pub fn share_text(subject: &str, text: &str) -> anyhow::Result<()> {
+    crate::os::android::dialog::share_text(subject, text);
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn share_text(_subject: &str, _text: &str) -> anyhow::Result<()> {
+    anyhow::bail!("sharing is only implemented on Android")
+}

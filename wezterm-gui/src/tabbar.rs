@@ -29,10 +29,24 @@ pub enum TabBarItem {
     None,
     LeftStatus,
     RightStatus,
-    Tab { tab_idx: usize, active: bool },
+    Tab {
+        tab_idx: usize,
+        active: bool,
+    },
     NewTabButton,
+    /// Opens the SSH host sidebar. Leftmost, so that it is reachable with a
+    /// thumb and does not move as tabs come and go.
+    SidebarButton,
     WindowButton(IntegratedTitleButton),
 }
+
+/// The label of the menu button that opens the host sidebar.
+///
+/// A word rather than a glyph: the vendored fonts have no hamburger, and a
+/// missing glyph renders as a box. The fancy tab bar draws real bars instead;
+/// this is the retro bar's rendering, and its *width* is what the division of the
+/// bar accounts for either way.
+const SIDEBAR_BUTTON_TEXT: &str = " ssh ";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabEntry {
@@ -490,8 +504,24 @@ impl TabBarState {
         let titles_len: usize = tab_titles.iter().map(|s| s.len).sum();
         let number_of_tabs = tab_titles.len();
 
-        let available_cells =
-            title_width.saturating_sub(number_of_tabs.saturating_sub(1) + new_tab.len());
+        // The menu button is drawn *in* the bar, so its width has to come out of
+        // the share the tabs divide up rather than being drawn over the result.
+        let sidebar_button = if config.android_host_sidebar {
+            parse_status_text(
+                SIDEBAR_BUTTON_TEXT,
+                if config.use_fancy_tab_bar {
+                    CellAttributes::default()
+                } else {
+                    new_tab_attrs.clone()
+                },
+            )
+        } else {
+            parse_status_text("", CellAttributes::default())
+        };
+
+        let available_cells = title_width.saturating_sub(
+            number_of_tabs.saturating_sub(1) + new_tab.len() + sidebar_button.len(),
+        );
         let tab_width_max = if config.use_fancy_tab_bar || available_cells >= titles_len {
             // We can render each title with its full width
             usize::max_value()
@@ -529,6 +559,17 @@ impl TabBarState {
             && config.integrated_title_button_alignment == IntegratedTitleButtonAlignment::Left
         {
             Self::integrated_title_buttons(mouse_x, &mut x, config, &mut items, &mut line, &colors);
+        }
+
+        if sidebar_button.len() > 0 {
+            items.push(TabEntry {
+                item: TabBarItem::SidebarButton,
+                title: sidebar_button.clone(),
+                x,
+                width: sidebar_button.len(),
+            });
+            x += sidebar_button.len();
+            line.append_line(sidebar_button.clone(), SEQ_ZERO);
         }
 
         let left_status_line = parse_status_text(left_status, black_cell.attrs().clone());

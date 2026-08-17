@@ -21,8 +21,9 @@ use crate::units::Dimension;
 use crate::unix::UnixDomain;
 use crate::wsl::WslDomain;
 use crate::{
-    default_android_extra_keys_row, default_config_with_overrides_applied, default_one_point_oh,
-    default_one_point_oh_f64, default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
+    default_android_extra_keys_row, default_android_host_sidebar,
+    default_config_with_overrides_applied, default_one_point_oh, default_one_point_oh_f64,
+    default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
     CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
@@ -489,6 +490,16 @@ pub struct Config {
     /// Bluetooth keyboard can turn it off to reclaim the space.
     #[dynamic(default = "default_android_extra_keys_row")]
     pub android_extra_keys_row: bool,
+
+    /// If true, show a menu button in the tab bar that opens the SSH host
+    /// sidebar.
+    ///
+    /// The sidebar exists because a phone has no comfortable way to run
+    /// `ssh host` -- there is no shell history to recall it from and no easy way
+    /// to type it -- so it defaults on there and off everywhere else, where a
+    /// shell and `wezterm.lua` are both to hand.
+    #[dynamic(default = "default_android_host_sidebar")]
+    pub android_host_sidebar: bool,
 
     #[dynamic(default)]
     pub tab_bar_at_bottom: bool,

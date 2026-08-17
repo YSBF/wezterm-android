@@ -145,6 +145,30 @@ class WezTermActivity : GameActivity() {
         }
     }
 
+    /**
+     * Offer text to whatever the user shares things with.
+     *
+     * Called over JNI from window/src/os/android/dialog.rs, already on the Java
+     * main thread. This is how the host list leaves the app at all: the file it
+     * is stored in lives in app-private storage, which nothing else can read, and
+     * a share intent needs neither a storage permission nor a file picker.
+     */
+    fun shareText(subject: String, text: String) {
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        try {
+            startActivity(Intent.createChooser(send, subject))
+        } catch (err: Exception) {
+            // No app to share with, or the chooser was refused. The Rust side
+            // falls back to the clipboard when this call reports nothing, so
+            // there is nothing to do but say why.
+            android.util.Log.w("wezterm", "could not start a share chooser", err)
+        }
+    }
+
     /** Implemented in window/src/os/android/ime.rs. */
     private external fun nativeSoftKeyboardVisible(visible: Boolean)
 
