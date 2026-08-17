@@ -12,9 +12,11 @@ pub mod bitmaps;
 pub use wezterm_color_types as color;
 mod configuration;
 pub mod connection;
+pub mod gesture;
 pub mod os;
 pub mod screen;
 mod spawn;
+pub mod touch;
 
 pub use raw_window_handle;
 
@@ -196,6 +198,17 @@ pub enum WindowEvent {
     MouseEvent(MouseEvent),
     MouseLeave,
 
+    /// A touch drag whose origin landed inside a published gesture region.
+    ///
+    /// The deltas are raw pixels since the previous motion event; the region's
+    /// owner knows its own extent and clamps against it. Only the Android
+    /// backend produces these. See `window::gesture`.
+    RegionDrag {
+        region: crate::gesture::GestureRegionId,
+        dx: f32,
+        dy: f32,
+    },
+
     AppearanceChanged(Appearance),
 
     Notification(Box<dyn Any + Send + Sync>),
@@ -342,21 +355,20 @@ pub trait WindowOps {
     /// environment.
     fn set_resize_increments(&self, _incr: ResizeIncrement) {}
 
-    /// Tell the backend the layout metrics that its input layer needs: how
-    /// large a terminal cell is, and how tall the extra-keys row along the
-    /// bottom of the window is, if there is one.
+    /// Tell the backend how large a terminal cell is.
     ///
     /// Only the Android backend implements this. Its gesture layer quantises a
-    /// drag into whole cells, and has to know which touches begin on the key
-    /// row rather than on the terminal. Deriving the cell size from
+    /// drag into whole cells. Deriving the cell size from
     /// `set_resize_increments` instead does not work: the GUI only sends real
     /// increments when `use_resize_increments` is set, and otherwise sends a
     /// disabled value of one pixel.
+    fn set_touch_metrics(&self, _cell_width: usize, _cell_height: usize) {}
+
+    /// Publish the regions of the window that claim touch gestures.
     ///
-    /// The row's *height* is passed rather than its top edge deliberately: the
-    /// height is a pure layout quantity, whereas positioning it needs the
-    /// surface size, which the backend knows and the GUI briefly does not.
-    fn set_touch_metrics(&self, _cell_width: usize, _cell_height: usize, _key_row_height: usize) {}
+    /// Only the Android backend implements this. See `window::gesture` for why
+    /// regions declare an anchor and an extent rather than a position.
+    fn set_gesture_regions(&self, _regions: Vec<crate::gesture::GestureRegion>) {}
 
     fn get_os_parameters(
         &self,

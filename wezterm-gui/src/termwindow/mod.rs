@@ -72,6 +72,7 @@ pub mod background;
 pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
+pub mod gesture;
 pub mod keyevent;
 pub mod keyrow;
 pub mod modal;
@@ -673,8 +674,7 @@ impl TermWindow {
         let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
         let key_row_height =
             Self::key_row_pixel_height_impl(&config, &fontconfig, &render_metrics).unwrap_or(0.);
-        let padding_bottom =
-            resize::effective_bottom_padding(&config, v_context, key_row_height);
+        let padding_bottom = resize::effective_bottom_padding(&config, v_context, key_row_height);
 
         let mut dimensions = Dimensions {
             pixel_width: (terminal_size.pixel_width + padding_left + padding_right) as usize,
@@ -979,6 +979,10 @@ impl TermWindow {
             }
             WindowEvent::MouseLeave => {
                 self.mouse_leave_impl(window);
+                Ok(true)
+            }
+            WindowEvent::RegionDrag { region, dx, dy } => {
+                self.region_drag_impl(region, dx, dy, window);
                 Ok(true)
             }
             WindowEvent::Resized {

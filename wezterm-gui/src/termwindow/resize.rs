@@ -198,8 +198,7 @@ impl super::TermWindow {
             };
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
             let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-            let padding_bottom =
-                effective_bottom_padding(&config, v_context, key_row_height);
+            let padding_bottom = effective_bottom_padding(&config, v_context, key_row_height);
             let padding_right = effective_right_padding(&config, h_context);
 
             let pixel_height = (rows * self.render_metrics.cell_size.height as usize)
@@ -244,8 +243,7 @@ impl super::TermWindow {
             };
             let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
             let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
-            let padding_bottom =
-                effective_bottom_padding(&config, v_context, key_row_height);
+            let padding_bottom = effective_bottom_padding(&config, v_context, key_row_height);
             let padding_right = effective_right_padding(&config, h_context);
 
             let avail_width = dimensions.pixel_width.saturating_sub(
@@ -316,16 +314,17 @@ impl super::TermWindow {
             ResizeIncrement::disabled()
         });
 
-        // A touch backend quantises gestures against the cell size, and has to
-        // know where the key row starts so that a drag there pans the row
-        // rather than scrolling the terminal. This cannot ride along on the
-        // resize increments above, which are a disabled sentinel unless the
-        // user opted into them.
+        // A touch backend quantises gestures against the cell size. This cannot
+        // ride along on the resize increments above, which are a disabled
+        // sentinel unless the user opted into them.
         window.set_touch_metrics(
             self.render_metrics.cell_size.width.max(1) as usize,
             self.render_metrics.cell_size.height.max(1) as usize,
-            self.key_row_pixel_height().unwrap_or(0.).max(0.) as usize,
         );
+
+        // A resize can change the height of the key row, and will change where
+        // the bottom edge it is anchored to lies.
+        self.publish_gesture_regions();
 
         // Queue up a speculative resize in order to preserve the number of rows+cols
         if let Some(cell_dims) = scale_changed_cells {

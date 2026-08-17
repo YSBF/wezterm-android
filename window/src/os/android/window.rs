@@ -59,7 +59,7 @@ pub(crate) struct WindowInner {
     /// A pending dead key from a physical keyboard.
     pub(crate) dead_key: Option<char>,
 
-    pub(crate) touch: super::touch::TouchState,
+    pub(crate) touch: crate::touch::TouchState,
 }
 
 impl WindowInner {
@@ -120,8 +120,9 @@ impl WindowInner {
             return;
         }
         self.dimensions = dimensions;
-        // Keep the key row band anchored to the new bottom edge.
-        self.touch.set_window_height(pixel_height as f64);
+        // Keep the published gesture regions anchored to the new edges.
+        self.touch
+            .set_window_size(pixel_width as f64, pixel_height as f64);
         self.events.dispatch(WindowEvent::Resized {
             dimensions,
             window_state: self.window_state,
@@ -554,7 +555,9 @@ impl HasDisplayHandle for Window {
     fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
         // Safety: the Android display handle carries no pointer; it is a
         // marker that identifies the platform.
-        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Android(AndroidDisplayHandle::new())) })
+        Ok(unsafe {
+            DisplayHandle::borrow_raw(RawDisplayHandle::Android(AndroidDisplayHandle::new()))
+        })
     }
 }
 
@@ -574,7 +577,9 @@ impl HasWindowHandle for Window {
         // which outlives this borrow because the caller holds `self`, and the
         // Connection keeps the WindowInner alive.
         Ok(unsafe {
-            WindowHandle::borrow_raw(RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(ptr)))
+            WindowHandle::borrow_raw(RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(
+                ptr,
+            )))
         })
     }
 }
@@ -694,15 +699,26 @@ impl WindowOps for Window {
     /// come from `set_touch_metrics`.
     fn set_resize_increments(&self, _incr: ResizeIncrement) {}
 
-    fn set_touch_metrics(&self, cell_width: usize, cell_height: usize, key_row_height: usize) {
+    fn set_touch_metrics(&self, cell_width: usize, cell_height: usize) {
         self.with_window_inner(move |inner| {
-            // The surface height is known here and is the space touches arrive
-            // in; the GUI's own window size is not reliably that.
-            let window_height = inner.dimensions.pixel_height as f64;
-            inner.touch.set_window_height(window_height);
             inner
                 .touch
-                .set_metrics(cell_width as f64, cell_height as f64, key_row_height as f64);
+                .set_metrics(cell_width as f64, cell_height as f64);
+            Ok(())
+        });
+    }
+
+    fn set_gesture_regions(&self, regions: Vec<crate::gesture::GestureRegion>) {
+        self.with_window_inner(move |inner| {
+            // The surface size is known here and is the space touches arrive
+            // in; the GUI's own window size is not reliably that, which is why
+            // regions arrive as an anchor and an extent to be placed rather
+            // than as coordinates.
+            inner.touch.set_window_size(
+                inner.dimensions.pixel_width as f64,
+                inner.dimensions.pixel_height as f64,
+            );
+            inner.touch.set_regions(regions);
             Ok(())
         });
     }

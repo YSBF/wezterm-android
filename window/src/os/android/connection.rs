@@ -18,11 +18,11 @@
 //! and less invasive than teaching `window/src/spawn.rs` about Android.
 
 use super::app;
-use super::touch::TouchOutcome;
 use super::window::{Window, WindowInner};
 use crate::connection::ConnectionOps;
 use crate::screen::{ScreenInfo, Screens};
 use crate::spawn::SPAWN_QUEUE;
+use crate::touch::TouchOutcome;
 use crate::{
     Appearance, Dimensions, RequestedWindowGeometry, WindowEvent, WindowEventSender, WindowState,
 };
@@ -182,10 +182,12 @@ impl Connection {
             surface_waiters: vec![],
             last_ime_text: String::new(),
             dead_key: None,
-            touch: super::touch::TouchState::new(density),
+            touch: crate::touch::TouchState::new(density),
         }));
 
-        self.windows.borrow_mut().insert(window_id, Rc::clone(&inner));
+        self.windows
+            .borrow_mut()
+            .insert(window_id, Rc::clone(&inner));
 
         let window_handle = Window(window_id);
         inner
@@ -209,7 +211,8 @@ impl Connection {
         // to be handed, so a handler that ran now would find a half-built
         // frontend.
         promise::spawn::spawn_into_main_thread(async move {
-            let Some(inner) = Connection::get().and_then(|conn| conn.window_by_id(window_id)) else {
+            let Some(inner) = Connection::get().and_then(|conn| conn.window_by_id(window_id))
+            else {
                 return;
             };
             let mut inner = inner.borrow_mut();
@@ -487,7 +490,7 @@ fn pinch_distance(motion: &android_activity::input::MotionEvent) -> f64 {
 }
 
 fn wheel_event(x: f64, y: f64, clicks: i16) -> WindowEvent {
-    use wezterm_input_types::{MouseButtons, MouseEvent, MouseEventKind, Modifiers};
+    use wezterm_input_types::{Modifiers, MouseButtons, MouseEvent, MouseEventKind};
     WindowEvent::MouseEvent(MouseEvent {
         kind: MouseEventKind::VertWheel(clicks),
         coords: crate::Point::new(x as isize, y as isize),
