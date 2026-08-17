@@ -9,7 +9,7 @@
 //! * `window` is the single activity-filling window and its EGL state.
 //! * `keyboard` maps Android keycodes onto wezterm key events.
 //! * `ime` tracks whether the soft keyboard is up.
-//! * `clipboard` is the one part that has to go through JNI.
+//! * `clipboard` and `dialog` are the parts that have to go through JNI.
 //!
 //! Gesture recognition lives in `crate::touch` rather than here, and the region
 //! registry it routes on in `crate::gesture`. Neither touches an Android API, so
@@ -19,6 +19,7 @@
 pub mod app;
 mod clipboard;
 mod connection;
+pub(crate) mod dialog;
 mod ime;
 mod keyboard;
 mod window;

@@ -44,6 +44,7 @@
 //! upstream in `Mux` -- but it is a recorded decision rather than an accident,
 //! and a long session that edits profiles repeatedly is the case to watch.
 
+use crate::dialog::{DialogField, DialogSpec, DialogValues, FieldKind};
 use anyhow::{anyhow, bail, Context};
 use config::{ConfigHandle, SshDomain, SshMultiplexing};
 use mux::domain::Domain;
@@ -637,6 +638,183 @@ pub fn ensure_domain(profile: &HostProfile) -> anyhow::Result<Arc<dyn Domain>> {
     Ok(domain)
 }
 
+/// The keys the host editor's answers arrive under.
+pub mod field {
+    pub const DISPLAY_NAME: &str = "display_name";
+    pub const HOST: &str = "host";
+    pub const PORT: &str = "port";
+    pub const USERNAME: &str = "username";
+    pub const PRIVATE_KEY: &str = "private_key";
+}
+
+/// The add/edit form, with any validation messages attached to their fields.
+///
+/// The errors travel in the spec rather than being reported separately, so
+/// redisplaying a rejected form keeps whatever the user typed. A dialog that
+/// cleared itself to report one typo would make them retype the rest.
+fn editor_spec(draft: &HostProfile, errors: &[ValidationError], is_new: bool) -> DialogSpec {
+    let error_for = |field: Field| {
+        errors
+            .iter()
+            .find(|error| error.field == field)
+            .map(|error| error.message.clone())
+    };
+
+    DialogSpec::new(if is_new { "Add host" } else { "Edit host" })
+        .submit_label("Save")
+        .field(
+            DialogField::new(
+                field::DISPLAY_NAME,
+                "Name",
+                FieldKind::Text,
+                &draft.display_name,
+            )
+            .hint("What the sidebar shows")
+            .error(error_for(Field::DisplayName)),
+        )
+        .field(
+            DialogField::new(field::HOST, "Host", FieldKind::Text, &draft.host)
+                .hint("host name or IP address")
+                .error(error_for(Field::Host)),
+        )
+        .field(
+            DialogField::new(
+                field::PORT,
+                "Port",
+                FieldKind::Number,
+                &draft.port.to_string(),
+            )
+            .error(error_for(Field::Port)),
+        )
+        .field(
+            DialogField::new(field::USERNAME, "User", FieldKind::Text, &draft.username)
+                .error(error_for(Field::Username)),
+        )
+}
+
+/// Apply the editor's answers to a draft.
+///
+/// A port that will not parse is left as `0` rather than silently reverting to
+/// the previous value or to 22: validation then rejects it and says so, which is
+/// the only outcome that tells the user what happened.
+fn apply_editor_values(draft: &mut HostProfile, values: &DialogValues) {
+    draft.display_name = values.get(field::DISPLAY_NAME).trim().to_string();
+    draft.host = values.get(field::HOST).trim().to_string();
+    draft.port = values.parse_u16(field::PORT).unwrap_or(0);
+    draft.username = values.get(field::USERNAME).trim().to_string();
+}
+
+/// Show the add/edit form until it validates, or the user gives up.
+///
+/// `None` means cancelled. The returned profile has not been stored: the caller
+/// decides between `HostRepository::add` and `update`, which is also what decides
+/// whether a generation is spent.
+pub async fn edit_interactively(
+    existing: Option<&HostProfile>,
+) -> anyhow::Result<Option<HostProfile>> {
+    let is_new = existing.is_none();
+    let mut draft = match existing {
+        Some(profile) => profile.clone(),
+        None => HostProfile::new("", "", DEFAULT_PORT, ""),
+    };
+    let mut errors: Vec<ValidationError> = vec![];
+
+    loop {
+        let spec = editor_spec(&draft, &errors, is_new);
+        let Some(values) = crate::dialog::present(&spec).await? else {
+            return Ok(None);
+        };
+
+        apply_editor_values(&mut draft, &values);
+        match draft.validate() {
+            Ok(()) => return Ok(Some(draft)),
+            // Round again with the same values and the messages beside the
+            // fields that earned them.
+            Err(found) => errors = found,
+        }
+    }
+}
+
+/// Ask for a private key, paste it into app-private storage, and return its path.
+///
+/// `None` means cancelled. The dialog states plainly that the key passes through
+/// the clipboard, and clears the clipboard on submit; see `import_key` for why
+/// that route is accepted at all.
+pub async fn import_key_interactively(profile: &HostProfile) -> anyhow::Result<Option<PathBuf>> {
+    let mut error: Option<String> = None;
+
+    loop {
+        let spec = DialogSpec::new("Private key")
+            .message(
+                "Paste an OpenSSH private key. It is stored inside this app's \
+                 private storage and never leaves the device.\n\n\
+                 Note that pasting puts the key on the system clipboard, where \
+                 Android keeps a history of recent clips and a cloud-syncing \
+                 keyboard may see it. The clipboard is cleared when you save.",
+            )
+            .submit_label("Import")
+            .clear_clipboard_on_submit(true)
+            .field(
+                DialogField::new(field::PRIVATE_KEY, "Key", FieldKind::SecretMultiline, "")
+                    .hint("-----BEGIN OPENSSH PRIVATE KEY-----")
+                    .error(error.take()),
+            );
+
+        let Some(mut values) = crate::dialog::present(&spec).await? else {
+            return Ok(None);
+        };
+
+        // Taken rather than read, so the key does not sit in the reply map for
+        // longer than the write needs it.
+        let pem = values.take(field::PRIVATE_KEY);
+        match import_key(&profile.id, &pem) {
+            Ok(path) => return Ok(Some(path)),
+            Err(err) => error = Some(format!("{err:#}")),
+        }
+    }
+}
+
+/// Routes `wezterm-ssh`'s interactive prompts to the native dialogs.
+///
+/// See `mux::sshprompt` for why they do not stay in the pane. Every method here
+/// is called from the ssh event loop's own thread, which already blocks on each
+/// prompt, so blocking on a dialog is what the caller expects.
+struct NativeSshPrompter;
+
+impl mux::sshprompt::SshPrompter for NativeSshPrompter {
+    fn verify_host(&self, message: &str) -> anyhow::Result<bool> {
+        let spec = crate::dialog::host_verify_spec(message);
+        smol::block_on(crate::dialog::confirm(&spec))
+    }
+
+    fn answer_prompt(&self, prompt: &str, echo: bool) -> anyhow::Result<String> {
+        let spec = crate::dialog::credential_spec(prompt, echo);
+        match smol::block_on(crate::dialog::present(&spec))? {
+            Some(mut values) => Ok(values.take(crate::dialog::CREDENTIAL_KEY)),
+            // A deliberate dismissal, which must fail the connection rather than
+            // fall through to a second prompt in the pane.
+            None => Err(mux::sshprompt::Cancelled.into()),
+        }
+    }
+
+    fn host_verification_failed(&self, message: &str) {
+        let spec = crate::dialog::host_verification_failed_spec(message);
+        // The answer is discarded: there is nothing to decide. Errors are logged
+        // rather than propagated because the pane shows the same warning anyway.
+        if let Err(err) = smol::block_on(crate::dialog::confirm(&spec)) {
+            log::warn!("could not show the host key warning: {err:#}");
+        }
+    }
+}
+
+/// Send ssh prompts to native dialogs, where there are any.
+pub fn install_ssh_prompter() {
+    if !crate::dialog::available() {
+        return;
+    }
+    mux::sshprompt::set_prompter(Arc::new(NativeSshPrompter));
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -950,5 +1128,100 @@ username = "u"
     fn a_pasted_key_must_look_like_one() {
         assert!(import_key("id", "").is_err());
         assert!(import_key("id", "ssh-rsa AAAA...").is_err());
+    }
+
+    #[test]
+    fn the_editor_offers_the_profile_it_is_editing() {
+        let profile = valid();
+        let spec = editor_spec(&profile, &[], false);
+        assert_eq!(spec.title, "Edit host");
+        let value_of = |key: &str| {
+            spec.fields
+                .iter()
+                .find(|field| field.key == key)
+                .map(|field| field.value.clone())
+                .unwrap()
+        };
+        assert_eq!(value_of(field::DISPLAY_NAME), "dev box");
+        assert_eq!(value_of(field::HOST), "dev.example.com");
+        assert_eq!(value_of(field::PORT), "22");
+        assert_eq!(value_of(field::USERNAME), "ysbf");
+        // The port gets a numeric keyboard rather than a full one.
+        let port = spec.fields.iter().find(|f| f.key == field::PORT).unwrap();
+        assert_eq!(port.kind, FieldKind::Number);
+    }
+
+    #[test]
+    fn a_rejected_form_keeps_the_typed_values_and_gains_messages() {
+        // This is the whole reason errors travel in the spec: a dialog that
+        // cleared itself to report one typo would make the user retype the rest.
+        let mut draft = valid();
+        draft.host = "has a space".to_string();
+        let errors = draft.validate().unwrap_err();
+
+        let spec = editor_spec(&draft, &errors, false);
+        let host = spec.fields.iter().find(|f| f.key == field::HOST).unwrap();
+        assert_eq!(host.value, "has a space");
+        assert!(host.error.is_some());
+        // And the fields that were fine carry no message.
+        let name = spec
+            .fields
+            .iter()
+            .find(|f| f.key == field::DISPLAY_NAME)
+            .unwrap();
+        assert!(name.error.is_none());
+    }
+
+    #[test]
+    fn a_new_host_starts_empty_on_the_default_port() {
+        let draft = HostProfile::new("", "", DEFAULT_PORT, "");
+        let spec = editor_spec(&draft, &[], true);
+        assert_eq!(spec.title, "Add host");
+        let port = spec.fields.iter().find(|f| f.key == field::PORT).unwrap();
+        assert_eq!(port.value, "22");
+    }
+
+    #[test]
+    fn the_editors_answers_are_trimmed_onto_the_draft() {
+        let mut draft = valid();
+        let before = draft.clone();
+        apply_editor_values(
+            &mut draft,
+            &DialogValues::from_pairs(&[
+                (field::DISPLAY_NAME, "  prod  "),
+                (field::HOST, " 10.0.0.1 "),
+                (field::PORT, "2222"),
+                (field::USERNAME, " root "),
+            ]),
+        );
+        assert_eq!(draft.display_name, "prod");
+        assert_eq!(draft.host, "10.0.0.1");
+        assert_eq!(draft.port, 2222);
+        assert_eq!(draft.username, "root");
+        // The identity and generation are the draft's, not the form's: they are
+        // what stops an edited profile colliding with the domain its previous
+        // version registered, so the form must not be able to touch them.
+        assert_eq!(draft.id, before.id);
+        assert_eq!(draft.generation, before.generation);
+    }
+
+    #[test]
+    fn a_port_that_will_not_parse_is_rejected_rather_than_guessed() {
+        // Silently reverting to 22, or to the previous value, would connect
+        // somewhere the user did not ask for and say nothing.
+        let mut draft = valid();
+        apply_editor_values(
+            &mut draft,
+            &DialogValues::from_pairs(&[
+                (field::DISPLAY_NAME, "dev"),
+                (field::HOST, "dev.example.com"),
+                (field::PORT, "not a port"),
+                (field::USERNAME, "ysbf"),
+            ]),
+        );
+        assert_eq!(draft.port, 0);
+        let errors = draft.validate().unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, Field::Port);
     }
 }

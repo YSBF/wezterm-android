@@ -38,6 +38,10 @@ pub fn set_android_app(app: AndroidApp) -> AppGeneration {
     let generation = slot.as_ref().map_or(0, |(g, _)| g + 1);
     if generation > 0 {
         log::info!("android_main re-entered; replacing the AndroidApp (generation {generation})");
+        // Any dialog the outgoing Activity was showing went with its window, so
+        // no callback is coming for it. Fail those requests rather than leaving
+        // whoever awaited them waiting forever.
+        super::dialog::cancel_pending("the Activity was recreated");
     }
     *slot = Some((generation, app));
     AppGeneration(generation)

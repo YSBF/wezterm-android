@@ -115,8 +115,47 @@ class WezTermActivity : GameActivity() {
         super.onDestroy()
     }
 
+    /**
+     * Present a dialog on behalf of the Rust side.
+     *
+     * Called over JNI from window/src/os/android/dialog.rs, already marshalled
+     * onto the Java main thread. [requestId] identifies the request and is
+     * echoed back with the answer: the Activity can be destroyed and recreated
+     * at any time, and the id is what stops a late callback from a dialog in a
+     * window that no longer exists resolving a request the user has since made.
+     *
+     * Exactly one [nativeDialogResult] follows each call, whatever happens,
+     * because the Rust side is waiting for it.
+     */
+    fun showNativeDialog(requestId: Long, spec: String) {
+        try {
+            WezTermDialogs.show(this, spec) { values ->
+                if (values == null) {
+                    nativeDialogResult(requestId, true, "")
+                } else {
+                    nativeDialogResult(requestId, false, WezTermDialogs.encode(values))
+                }
+            }
+        } catch (err: Exception) {
+            // Anything at all: the caller must not be left waiting. Note that
+            // this logs the failure and not the spec, which is fine either way
+            // -- a spec carries labels and existing values, never an answer.
+            android.util.Log.e("wezterm", "showNativeDialog failed", err)
+            nativeDialogResult(requestId, true, "")
+        }
+    }
+
     /** Implemented in window/src/os/android/ime.rs. */
     private external fun nativeSoftKeyboardVisible(visible: Boolean)
+
+    /**
+     * Implemented in window/src/os/android/dialog.rs.
+     *
+     * A boolean rather than a nullable payload, so that a cancellation cannot be
+     * confused with an empty answer and null handling stays out of the FFI
+     * boundary.
+     */
+    private external fun nativeDialogResult(requestId: Long, cancelled: Boolean, payload: String)
 
     private fun startMuxService() {
         val intent = Intent(this, MuxService::class.java)

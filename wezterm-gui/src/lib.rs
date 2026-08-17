@@ -43,6 +43,7 @@ pub mod android;
 mod colorease;
 mod commands;
 mod customglyph;
+pub mod dialog;
 mod download;
 mod frontend;
 mod glyphcache;

@@ -86,6 +86,10 @@ fn run(dirs: &AndroidDirs) -> anyhow::Result<()> {
 
     presize_initial_grid();
 
+    // Send ssh's host-key and password prompts to native dialogs rather than
+    // into the pane. See mux::sshprompt for why.
+    crate::hosts::install_ssh_prompter();
+
     let config = config::configuration();
     if let Some(value) = &config.default_ssh_auth_sock {
         std::env::set_var("SSH_AUTH_SOCK", value);

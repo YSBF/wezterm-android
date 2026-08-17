@@ -77,14 +77,22 @@ pub fn ssh_connect_with_ui(
                     }
                 }
                 SessionEvent::HostVerify(verify) => {
-                    ui.output_str(&format!("{}\n", verify.message));
-                    let ok = if let Ok(line) = ui.input("Enter [y/n]> ") {
-                        match line.as_ref() {
-                            "y" | "Y" | "yes" | "YES" => true,
-                            "n" | "N" | "no" | "NO" | _ => false,
+                    // A registered prompter takes this out of the pane; see
+                    // crate::sshprompt for why. Its failure falls through to the
+                    // prompt below rather than failing the connection.
+                    let ok = match ask_prompter_to_verify(&verify.message) {
+                        Some(ok) => ok,
+                        None => {
+                            ui.output_str(&format!("{}\n", verify.message));
+                            if let Ok(line) = ui.input("Enter [y/n]> ") {
+                                match line.as_ref() {
+                                    "y" | "Y" | "yes" | "YES" => true,
+                                    "n" | "N" | "no" | "NO" | _ => false,
+                                }
+                            } else {
+                                false
+                            }
                         }
-                    } else {
-                        false
                     };
                     smol::block_on(verify.answer(ok)).context("send verify response")?;
                 }
@@ -97,6 +105,10 @@ pub fn ssh_connect_with_ui(
                     }
                     let mut answers = vec![];
                     for prompt in &auth.prompts {
+                        if let Some(answer) = ask_prompter_to_answer(&prompt.prompt, prompt.echo)? {
+                            answers.push(answer);
+                            continue;
+                        }
                         let mut prompt_lines = prompt.prompt.split('\n').collect::<Vec<_>>();
                         let editor_prompt = prompt_lines.pop().unwrap();
                         for line in &prompt_lines {
@@ -116,6 +128,9 @@ pub fn ssh_connect_with_ui(
                     smol::block_on(auth.answer(answers))?;
                 }
                 SessionEvent::HostVerificationFailed(failed) => {
+                    if let Some(prompter) = crate::sshprompt::prompter() {
+                        prompter.host_verification_failed(&format_host_verification(&failed));
+                    }
                     let message = format_host_verification_for_terminal(failed);
                     ui.output(message);
                     anyhow::bail!("Host key verification failed");
@@ -128,6 +143,69 @@ pub fn ssh_connect_with_ui(
         }
         bail!("unable to authenticate session");
     })
+}
+
+/// Offer a host key question to a registered prompter.
+///
+/// `None` means "nobody took it, ask in the pane": either no prompter is
+/// registered, or the one that is could not show the question. A front end whose
+/// dialog failed should not make the host unreachable.
+fn ask_prompter_to_verify(message: &str) -> Option<bool> {
+    let prompter = crate::sshprompt::prompter()?;
+    match prompter.verify_host(message) {
+        Ok(answer) => Some(answer),
+        Err(err) => {
+            log::warn!("the ssh prompter could not verify the host key: {err:#}");
+            None
+        }
+    }
+}
+
+/// Offer an authentication prompt to a registered prompter.
+///
+/// `Ok(None)` means "ask in the pane", as above. `Err` is a deliberate
+/// cancellation by the user, which must fail the connection rather than falling
+/// back to a second prompt they did not ask for.
+fn ask_prompter_to_answer(prompt: &str, echo: bool) -> anyhow::Result<Option<String>> {
+    let Some(prompter) = crate::sshprompt::prompter() else {
+        return Ok(None);
+    };
+    match prompter.answer_prompt(prompt, echo) {
+        Ok(answer) => Ok(Some(answer)),
+        Err(err) if err.is::<crate::sshprompt::Cancelled>() => Err(err),
+        Err(err) => {
+            log::warn!("the ssh prompter could not ask for credentials: {err:#}");
+            Ok(None)
+        }
+    }
+}
+
+/// The host key mismatch, as one block of text.
+///
+/// The terminal rendering below says the same thing with attributes and double
+/// height, which a dialog cannot use.
+fn format_host_verification(failed: &HostVerificationFailed) -> String {
+    let mut message = String::from(
+        "REMOTE HOST IDENTIFICATION CHANGED\n\
+         SOMEONE MAY BE DOING SOMETHING NASTY!\n\n\
+         There are two likely causes for this:\n\
+         \x20 1. Someone is eavesdropping right now (man-in-the-middle attack)\n\
+         \x20 2. The host key may have been changed by the administrator\n\n\
+         Please contact your system administrator to discuss how to proceed!\n\n",
+    );
+    message.push_str(&format!(
+        "The host is {}, and its fingerprint is\n{}\n",
+        failed.remote_address, failed.key
+    ));
+    if let Some(file) = &failed.file {
+        message.push_str(&format!(
+            "\nIf the administrator confirms that the key has changed, you can \
+             fix this for yourself by removing the offending entry from {} and \
+             then trying again.\n",
+            file.display()
+        ));
+    }
+    message
 }
 
 fn format_host_verification_for_terminal(failed: HostVerificationFailed) -> Vec<Change> {
@@ -598,18 +676,26 @@ fn connect_ssh_session(
                 }
             }
             SessionEvent::HostVerify(verify) => {
-                shim.output_line(&verify.message)?;
-                let mut editor = LineEditor::new(&mut shim);
-                let mut host = PasswordPromptHost::default();
-                host.echo = true;
-                editor.set_prompt("Enter [y/n]> ");
-                let ok = if let Some(line) = editor.read_line(&mut host)? {
-                    match line.as_ref() {
-                        "y" | "Y" | "yes" | "YES" => true,
-                        "n" | "N" | "no" | "NO" | _ => false,
+                // A registered prompter takes this out of the pane; see
+                // crate::sshprompt for why. Its failure falls through to the
+                // in-pane prompt rather than failing the connection.
+                let ok = match ask_prompter_to_verify(&verify.message) {
+                    Some(ok) => ok,
+                    None => {
+                        shim.output_line(&verify.message)?;
+                        let mut editor = LineEditor::new(&mut shim);
+                        let mut host = PasswordPromptHost::default();
+                        host.echo = true;
+                        editor.set_prompt("Enter [y/n]> ");
+                        if let Some(line) = editor.read_line(&mut host)? {
+                            match line.as_ref() {
+                                "y" | "Y" | "yes" | "YES" => true,
+                                "n" | "N" | "no" | "NO" | _ => false,
+                            }
+                        } else {
+                            false
+                        }
                     }
-                } else {
-                    false
                 };
                 smol::block_on(verify.answer(ok)).context("send verify response")?;
             }
@@ -622,6 +708,10 @@ fn connect_ssh_session(
                 }
                 let mut answers = vec![];
                 for prompt in &auth.prompts {
+                    if let Some(answer) = ask_prompter_to_answer(&prompt.prompt, prompt.echo)? {
+                        answers.push(answer);
+                        continue;
+                    }
                     let mut prompt_lines = prompt.prompt.split('\n').collect::<Vec<_>>();
                     let editor_prompt = prompt_lines.pop().unwrap();
                     for line in &prompt_lines {
@@ -643,6 +733,9 @@ fn connect_ssh_session(
                 shim.output_line(&format!("Error: {}", err))?;
             }
             SessionEvent::HostVerificationFailed(failed) => {
+                if let Some(prompter) = crate::sshprompt::prompter() {
+                    prompter.host_verification_failed(&format_host_verification(&failed));
+                }
                 let message = format_host_verification_for_terminal(failed);
                 shim.render(&message)?;
             }
