@@ -2,10 +2,17 @@
 
 ## Status
 
-**Design proposal, revision 3.** This document describes the next user-interface
-layer for the Android port: an in-terminal SSH host sidebar and a more usable
-extra-keys row.  It does not change the existing terminal renderer, mux, or
-Android activity architecture.
+**Implemented, revision 3, phases 1--5.** This document described the next
+user-interface layer for the Android port: an in-terminal SSH host sidebar and a
+more usable extra-keys row.  Phases 1 to 5 are built; phase 6, which is
+on-device verification, has not been done because no device has been available.
+See "What was built" below for where each piece landed and where the
+implementation departed from what was written here, and "Phase 6" for the
+verification that is still owed.
+
+The one statement above that did not survive contact: this *did* touch the
+renderer.  The box model had no clipping, and the pinned key cluster cannot be
+correct without it.
 
 ## Revision history
 
@@ -549,6 +556,173 @@ bug rather than as one of the connection states phase 5 renders.
 Phases 1 and 2 are independent of each other.  Phase 5 is separated from phase 4
 because it is the only part that touches window geometry, and it should not be
 able to delay a working overlay sidebar.
+
+## What was built
+
+Where each phase landed, and every place the implementation decided something
+this document did not, or decided it differently.  A plan that is quietly
+departed from stops being a description of the code.
+
+### Phase 1, the gesture registry and the key row
+
+`window/src/gesture.rs` defines a region; `window/src/touch.rs` routes on it.
+Gesture recognition moved out of `window/src/os/android/` to the crate root:
+it touches no Android API, and in the root its regression tests run on a
+desktop host.
+
+* **Taps are not claimable.**  A region declares drag axes and long press, and
+  not tap.  A tap already arrives as a synthesised press and release that the
+  GUI resolves against the `UIItem` list it built while rendering, which is a
+  hit test against real geometry rather than against a declared extent.  Adding
+  a tap claim would have duplicated that with a coarser answer, and the scrim's
+  tap-to-close works through the existing mechanism.
+* Claimed drags come back as `WindowEvent::RegionDrag` in raw pixels, replacing
+  the horizontal-wheel-means-pan convention the row had been using.  The GUI
+  clamps against its own extent; quantising in the backend made a short pan feel
+  dead.
+* A suppressed long press also had to mark itself resolved, or the event loop
+  spins for as long as a finger rests on a button.
+* One thing this document did not anticipate: a lifted finger left the GUI
+  resolving the last touch point against its UI items forever, so the key just
+  tapped held its pressed colours until the next tap.  The touch layer now
+  reports `MouseLeave` after a tap.
+
+`ComputedElement` gained a `clip`, applied to both the quads and the `UIItem`s.
+There is no draw call to hang a scissor rectangle on -- the allocators are
+batched -- so the clip trims geometry: filled rectangles are cut, glyphs are cut
+in position and texture together, and a rounded corner that straddles the edge
+is dropped, which is invisible because a corner is drawn by *not* filling that
+region rather than by painting over it.
+
+* **Modifier state is two masks, not one.**  This document said it "stays a
+  single `Modifiers` on `TermWindow`, as today".  Three states need two bits per
+  modifier, so it is two masks in one value.  The part that mattered -- one set
+  per window rather than a map per pane -- is unchanged.
+* **Clearing on focus change is checked, not hooked.**  The active pane changes
+  from a tap, from split navigation, from a tab switch and from a pane closing.
+  A hook at each is a hook that the next one added forgets, so the check lives at
+  the two points that cannot be bypassed: where the state is consumed and where
+  it is drawn.
+* Fixed gaps, keys left-aligned.  The row does not spread to fill a wide screen,
+  because spreading moves keys when the window or the key set changes and the
+  row's whole value is that a key stays where the finger expects it.
+* `dp` is `value * dpi / 72`.  That is not an approximation: Android's reported
+  density is scaled by 72/160 before wezterm sees it, so that `font_size` in
+  points behaves as `sp`, which makes one point in that space exactly one dp.
+* A pan slides the laid-out keys rather than discarding the layout.  Rebuilding
+  per motion event reshapes every label, and stalls: the next event reads a max
+  scroll of zero from the layout the previous one threw away.
+
+### Phase 2, hosts and the connect path
+
+`wezterm-gui/src/hosts.rs`.
+
+* **Stored under `DATA_DIR`, not the config directory.**  This document offered
+  the choice.  The file is written by the app and never edited by hand, and the
+  config directories are where wezterm looks for what the user maintains.
+* Validation reports every problem at once, so the editor can show them all
+  beside their fields.
+* An edit that changes nothing does not burn a generation, because each one
+  leaves a dead domain behind for the life of the process.
+
+### Phase 3, dialogs and prompts
+
+`window/src/os/android/dialog.rs` is the transport, `wezterm-gui/src/dialog.rs`
+owns the schema, `WezTermDialogs.kt` renders it.
+
+* A cancellation is a boolean rather than a null payload: it cannot then be
+  confused with an empty answer, and null handling stays out of the FFI boundary.
+* **Key import is its own dialog, not a field on the host editor.**  Otherwise
+  saving a host clears the clipboard for no reason, and the editor does not fit
+  above the soft keyboard.
+* **Ssh prompts route through `mux::sshprompt`,** an optional trait a front end
+  registers.  The fallback distinguishes two failures that mean opposite things:
+  a prompter that *could not ask* hands the question back to the pane, while a
+  user who *dismissed* it fails the connection rather than being asked the same
+  thing a second way.
+
+### Phase 4, the overlay sidebar
+
+`wezterm-gui/src/termwindow/sidebar.rs`.
+
+* The menu button is a counted item in the tab bar's division of its width.  As
+  this document asked, the branch state was checked rather than assumed:
+  `d801161fb` is still not on `android-port`, so this is the squashing layout.
+* Rows carry profile ids, not indices: an index baked into a cached element tree
+  points at whatever moved into that slot after a delete.
+* Header and footer rows carry an inert item, so that a tap on them is swallowed
+  by the drawer instead of moving the terminal's cursor behind it.
+
+### Phase 5, the viewport rectangle
+
+`wezterm-gui/src/termwindow/viewport.rs`.
+
+* **The fix went further than this document described, and had to.**  The plan
+  framed `dimensions` as unreliable input to grid recalculation.  It is also the
+  origin of the coordinate space *everything* is drawn in, so while it disagrees
+  with the surface the whole frame is offset, not merely the grid.  So a window
+  that cannot resize is no longer given dimensions it will never have:
+  `apply_dimensions` lays out against the surface instead.  That is the honest
+  reading of "treat the window cannot resize as normal on this platform".
+* Where the grid *starts* is handled by folding the pinned inset into the
+  effective left padding -- the same trick the key row uses with the bottom
+  padding, so the grid, the splits, the overlays and tap-to-cell mapping all keep
+  clear of it with no further changes.
+* Pinning is offered only above 600dp of surface: 320dp of panel plus 280dp of
+  terminal.  That it is also Android's own "large screen" figure is a
+  coincidence, arrived at from the other direction.
+
+### Verified off-device
+
+`cargo build` for `aarch64-linux-android`, `cargo check` for the desktop target,
+`./gradlew assembleDebug`, and the unit tests in `window`, `mux` and
+`wezterm-gui`.  R8 was run over the release classes and the four
+JNI-reachable members -- `showNativeDialog`, `nativeDialogResult`, `shareText`,
+`nativeSoftKeyboardVisible` -- were confirmed present and unrenamed in the
+release dex, since a stripped native method is an `UnsatisfiedLinkError` that
+would only surface on a device.
+
+None of that exercises a finger, a soft keyboard, an sshd or a rotation.
+
+## Phase 6: what is still owed
+
+Not done.  `adb devices` is empty, and every item in phase 6 needs hardware.
+Nothing below is a known defect; they are the things the off-device checks above
+cannot answer, listed so that the first session with a device is not spent
+working out what to look at.
+
+The phase 6 list stands as written.  These are the specific things this
+implementation would like watched, because they are where it guessed:
+
+* **The pinned/scrolling boundary.**  It is the measured right edge of the pinned
+  cluster.  Confirm that the first scrolling key sits flush against it, that a
+  key panned underneath is cut off cleanly rather than drawn over `CTRL`, and
+  that tapping just left of the boundary always gives the pinned key.  A `CTRL`
+  that occasionally types `ESC` is the failure the clip and the hit-test order
+  exist to prevent, and it would be intermittent.
+* **Whether 48dp is enough.**  The row is now 48dp plus padding against the 34dp
+  it was.  That is screen taken from the terminal, and whether the trade reads as
+  worth it is a judgement only a thumb can make.
+* **Armed versus locked, told apart at a glance.**  Armed is the cursor colour,
+  locked is the key inverted.  Check both against a light theme as well as a
+  dark one; the inversion was chosen for exactly that reason but has not been
+  looked at.
+* **A vertical drag starting on the key row.**  It is claimed by the row and
+  does nothing, deliberately.  Confirm that it does not feel broken.
+* **Pinned mode's column count.**  The inset is folded into the effective left
+  padding, so the grid, the splits, the overlays and tap-to-cell mapping should
+  all shift together.  A tap landing one cell off would show up here.
+* **Rotating with the sidebar pinned**, which resizes the surface and the panel
+  and the grid at once.
+* **The dialogs against a real IME.**  Whether the host editor and a pasted key
+  both fit above the soft keyboard, and whether the multi-line key field is
+  usable at all on a phone.
+* **Clipboard clearing after a key import,** and whether Android 13's clipboard
+  preview showed the key on the way in.  The import is honest about that
+  happening, but nobody has watched it happen.
+* **Domain accumulation.**  Edit and reconnect twenty times and watch memory.
+  The decision to leak dead domains for the life of the process is recorded, not
+  measured.
 
 ## Out of scope
 
