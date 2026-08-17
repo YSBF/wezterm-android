@@ -363,6 +363,14 @@ impl crate::TermWindow {
             .bottom
             .evaluate_as_pixels(v_context);
 
+        // A pinned sidebar occupies the left of the surface, so terminal content
+        // starts to the right of it. Folding it into the left padding is the same
+        // trick the key row uses with the bottom padding: every site that already
+        // accounts for padding -- the grid, the splits, the overlays, and mapping
+        // a tap back to a cell -- then keeps clear of it with no further changes.
+        let left_inset = self.terminal_viewport().left_inset as f32;
+        let padding_left = padding_left + left_inset;
+
         let horizontal_gap = self.dimensions.pixel_width as f32
             - self.terminal_size.pixel_width as f32
             - padding_left

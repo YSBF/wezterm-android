@@ -85,6 +85,7 @@ pub mod resize;
 mod selection;
 pub mod sidebar;
 pub mod spawn;
+pub mod viewport;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
@@ -398,8 +399,17 @@ pub struct TermWindow {
     /// When we most recently received keyboard focus
     pub focused: Option<Instant>,
     fonts: Rc<FontConfiguration>,
-    /// Window dimensions and dpi
+    /// Window dimensions and dpi.
+    ///
+    /// What the GUI would *like* the window to be, and the space everything is
+    /// drawn in. Not necessarily the size of the surface: see
+    /// `surface_dimensions` and the `viewport` module.
     pub dimensions: Dimensions,
+    /// The size of the surface, as last reported by the backend.
+    ///
+    /// The one thing that is true about the window on a platform where it cannot
+    /// be resized. Written only by `note_surface_dimensions`.
+    pub surface_dimensions: Dimensions,
     pub window_state: WindowState,
     pub resizes_pending: usize,
     is_repaint_pending: bool,
@@ -751,6 +761,7 @@ impl TermWindow {
             fonts: Rc::clone(&fontconfig),
             render_metrics,
             dimensions,
+            surface_dimensions: dimensions,
             window_state: WindowState::default(),
             resizes_pending: 0,
             is_repaint_pending: false,

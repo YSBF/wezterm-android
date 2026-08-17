@@ -89,6 +89,10 @@ pub enum SidebarItem {
     Export,
     Reset,
     Close,
+    /// Pin the sidebar, reducing the terminal's usable width.
+    Pin,
+    /// Return a pinned sidebar to being an overlay.
+    Unpin,
     /// Something drawn but not tappable. It still needs an item so that a tap
     /// on it is swallowed by the drawer rather than reaching the terminal
     /// behind.
@@ -105,6 +109,12 @@ const MAX_WIDTH_DP: f32 = 360.;
 
 /// Pinned width, in dp. Within the 300--360dp the plan calls for.
 const PINNED_WIDTH_DP: f32 = 320.;
+
+/// The narrowest terminal worth leaving beside a pinned panel, in dp.
+///
+/// 280dp is about 40 columns at a default font size, which is the point below
+/// which a shell prompt starts wrapping on its own.
+const MIN_TERMINAL_WIDTH_DP: f32 = 280.;
 
 /// A row in the host list, in dp. The same 48dp target as the key row's
 /// preferred size: a mis-tap here connects somewhere or deletes something.
@@ -240,11 +250,25 @@ impl TermWindow {
         )
     }
 
+    /// True when pinning would leave a usable terminal beside the panel.
+    ///
+    /// Pinned mode is for landscape and for tablets. On a phone in portrait the
+    /// panel and a terminal cannot both have room, and offering the choice would
+    /// mean offering a way to make the terminal unusable.
+    pub fn can_pin_sidebar(&self) -> bool {
+        let dpi = self.dimensions.dpi as f64;
+        // `dimensions` rather than `surface_dimensions`: the two now agree, and
+        // this is the space the panel is drawn in. See the `viewport` module for
+        // what keeps them in step.
+        can_pin(self.dimensions.pixel_width as f32, dpi)
+    }
+
     /// Open, close, or swap between overlay and pinned.
     pub fn set_sidebar_state(&mut self, state: SidebarState) {
         if self.sidebar.state == state {
             return;
         }
+        let was_pinned = self.sidebar.state == SidebarState::Pinned;
         self.sidebar.state = state;
         self.sidebar.invalidate();
         if state.is_open() {
@@ -259,6 +283,18 @@ impl TermWindow {
         // Opening changes gesture routing for the whole surface, not just for
         // the drawer: see `publish_gesture_regions`.
         self.publish_gesture_regions();
+
+        // Only pinning takes width away from the terminal, so only crossing that
+        // boundary needs the grid and the pty resized. An overlay deliberately
+        // does not, which is what keeps the common case off the
+        // window-geometry path entirely.
+        if was_pinned != (state == SidebarState::Pinned) {
+            if let Some(window) = self.window.as_ref().cloned() {
+                let dimensions = self.dimensions;
+                self.apply_dimensions(&dimensions, None, &window);
+            }
+        }
+
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }
@@ -482,12 +518,17 @@ impl TermWindow {
                 .min_height(Some(Dimension::Pixels(spacer_height))),
         );
 
-        children.push(self.sidebar_action_row(
-            font,
-            dpi,
-            drawer.width(),
-            &[("+  Add host", SidebarItem::Add)],
-        ));
+        let mut top_actions: Vec<(&str, SidebarItem)> = vec![("+  Add host", SidebarItem::Add)];
+        // Pinning is only offered where it leaves a terminal worth having beside
+        // the panel; on a phone in portrait there is no such width.
+        if self.can_pin_sidebar() {
+            top_actions.push(if self.sidebar.state == SidebarState::Pinned {
+                ("Unpin", SidebarItem::Unpin)
+            } else {
+                ("Pin", SidebarItem::Pin)
+            });
+        }
+        children.push(self.sidebar_action_row(font, dpi, drawer.width(), &top_actions));
         children.push(self.sidebar_action_row(
             font,
             dpi,
@@ -952,6 +993,8 @@ impl TermWindow {
             SidebarItem::Add => self.edit_host_profile(None),
             SidebarItem::Edit(id) => self.edit_host_profile(Some(id)),
             SidebarItem::Delete(id) => self.delete_host_profile(&id),
+            SidebarItem::Pin => self.set_sidebar_state(SidebarState::Pinned),
+            SidebarItem::Unpin => self.set_sidebar_state(SidebarState::Overlay),
             SidebarItem::Export => self.export_host_profiles(),
             SidebarItem::Reset => self.reset_host_profiles(),
         }
@@ -1127,6 +1170,11 @@ impl TermWindow {
     }
 }
 
+/// True when pinning leaves a terminal worth having beside the panel.
+fn can_pin(surface_width: f32, dpi: f64) -> bool {
+    surface_width - dp(PINNED_WIDTH_DP, dpi) >= dp(MIN_TERMINAL_WIDTH_DP, dpi)
+}
+
 /// The drawer's width for a state and a surface.
 ///
 /// A free function so that the arithmetic can be tested without a window: it is
@@ -1191,6 +1239,22 @@ mod test {
             sidebar_width(SidebarState::Pinned, 2400., DPI),
             dp(PINNED_WIDTH_DP, DPI)
         );
+    }
+
+    #[test]
+    fn pinning_is_offered_only_where_a_terminal_fits_beside_it() {
+        // A phone in portrait, 392dp: the panel and a usable terminal cannot both
+        // have room, so the choice is not offered rather than offered and
+        // regretted.
+        assert!(!can_pin(PHONE_WIDTH, DPI));
+        // The same phone rotated, 873dp.
+        assert!(can_pin(2400., DPI));
+
+        // The threshold is 320dp of panel plus 280dp of terminal, which lands on
+        // 600dp -- the same figure Android itself uses to mean "a large screen",
+        // arrived at from the other direction.
+        assert!(can_pin(dp(600., DPI), DPI));
+        assert!(!can_pin(dp(599., DPI), DPI));
     }
 
     #[test]

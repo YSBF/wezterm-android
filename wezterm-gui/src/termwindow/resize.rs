@@ -46,6 +46,10 @@ impl super::TermWindow {
             log::trace!("dimensions didn't change NOP!");
             return;
         }
+        // A resize event is the backend telling us how big the surface really
+        // is, and it is the only thing that does. See the `viewport` module.
+        self.note_surface_dimensions(dimensions);
+
         let last_state = self.window_state;
         self.window_state = window_state;
         self.quad_generation += 1;
@@ -141,12 +145,21 @@ impl super::TermWindow {
             self.window_state
         );
         let saved_dims = self.dimensions;
+        // A window that cannot resize does not get dimensions it will never
+        // have: every layout, and the projection everything is drawn through, is
+        // in terms of this value, so a request the window declines would put the
+        // grid, the key row and the sidebar somewhere the user cannot see. On
+        // Android that is not an unusual case to be worked around -- the window
+        // always fills the activity and can never be resized -- so it is not
+        // reported as a failure either. See the `viewport` module.
+        let dimensions = &self.dimensions_for_layout(dimensions);
         self.dimensions = *dimensions;
         self.quad_generation += 1;
 
         if scale_changed_cells.is_some() && !self.window_state.can_resize() {
-            log::warn!(
-                "cannot resize window to match {:?} because window_state is {:?}",
+            log::debug!(
+                "cannot resize window to match {:?} because window_state is {:?}; \
+                 keeping the surface size instead",
                 scale_changed_cells,
                 self.window_state
             );
@@ -246,12 +259,18 @@ impl super::TermWindow {
             let padding_bottom = effective_bottom_padding(&config, v_context, key_row_height);
             let padding_right = effective_right_padding(&config, h_context);
 
-            let avail_width = dimensions.pixel_width.saturating_sub(
+            // The single input to grid recalculation and, through it, to the pty
+            // resize. Taken from the surface the backend reported rather than
+            // from the window size, and already less a pinned sidebar's width.
+            // See the `viewport` module for what goes wrong otherwise.
+            let viewport = self.terminal_viewport();
+
+            let avail_width = viewport.width.saturating_sub(
                 (padding_left + padding_right) as usize
                     + (border.left + border.right).get() as usize,
             );
-            let avail_height = dimensions
-                .pixel_height
+            let avail_height = viewport
+                .height
                 .saturating_sub(
                     (padding_top + padding_bottom) as usize
                         + (border.top + border.bottom).get() as usize,
@@ -304,6 +323,9 @@ impl super::TermWindow {
         // outside the new surface entirely. Raising the soft keyboard shrinks
         // the window enough for the row to disappear off the bottom.
         self.key_row.take();
+        // The drawer is laid out against the window's pixel size too, and its
+        // height depends on the tab bar and the key row it sits between.
+        self.sidebar.invalidate();
         self.update_title();
 
         window.set_resize_increments(if self.config.use_resize_increments {
