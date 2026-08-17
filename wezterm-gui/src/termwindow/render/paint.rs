@@ -66,6 +66,16 @@ impl crate::TermWindow {
                         };
                         self.invalidate_fancy_tab_bar();
                         self.invalidate_modal();
+                        // The key row caches a computed element holding sprite
+                        // coordinates into the atlas. Clearing or regrowing the
+                        // atlas leaves those pointing at whatever now occupies
+                        // that region, so the labels render as fragments of
+                        // other glyphs. Note that this belongs here rather than
+                        // beside the allocated_more_quads() invalidation above:
+                        // rebuilding the row allocates quads, so invalidating it
+                        // there makes every pass allocate again and the loop
+                        // never terminates.
+                        self.key_row.take();
 
                         if let Err(err) = result {
                             self.allow_images = match self.allow_images {
