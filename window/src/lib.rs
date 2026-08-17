@@ -342,6 +342,22 @@ pub trait WindowOps {
     /// environment.
     fn set_resize_increments(&self, _incr: ResizeIncrement) {}
 
+    /// Tell the backend the layout metrics that its input layer needs: how
+    /// large a terminal cell is, and how tall the extra-keys row along the
+    /// bottom of the window is, if there is one.
+    ///
+    /// Only the Android backend implements this. Its gesture layer quantises a
+    /// drag into whole cells, and has to know which touches begin on the key
+    /// row rather than on the terminal. Deriving the cell size from
+    /// `set_resize_increments` instead does not work: the GUI only sends real
+    /// increments when `use_resize_increments` is set, and otherwise sends a
+    /// disabled value of one pixel.
+    ///
+    /// The row's *height* is passed rather than its top edge deliberately: the
+    /// height is a pure layout quantity, whereas positioning it needs the
+    /// surface size, which the backend knows and the GUI briefly does not.
+    fn set_touch_metrics(&self, _cell_width: usize, _cell_height: usize, _key_row_height: usize) {}
+
     fn get_os_parameters(
         &self,
         _config: &ConfigHandle,

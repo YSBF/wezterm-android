@@ -120,6 +120,8 @@ impl WindowInner {
             return;
         }
         self.dimensions = dimensions;
+        // Keep the key row band anchored to the new bottom edge.
+        self.touch.set_window_height(pixel_height as f64);
         self.events.dispatch(WindowEvent::Resized {
             dimensions,
             window_state: self.window_state,
@@ -683,12 +685,24 @@ impl WindowOps for Window {
 
     fn set_text_cursor_position(&self, _cursor: Rect) {}
 
-    /// Android windows are not resizable, but this is the one call that tells
-    /// the backend how large a cell is, which is what a drag gesture needs in
-    /// order to scroll by a whole number of lines.
-    fn set_resize_increments(&self, incr: ResizeIncrement) {
+    /// Android windows are not resizable, so there is nothing to constrain.
+    ///
+    /// This used to double as the channel that told the gesture layer how tall
+    /// a cell is, but the value that arrives here is `ResizeIncrement::disabled()`
+    /// -- one pixel -- unless the user has turned on `use_resize_increments`,
+    /// which made a drag scroll one line per pixel of travel. The metrics now
+    /// come from `set_touch_metrics`.
+    fn set_resize_increments(&self, _incr: ResizeIncrement) {}
+
+    fn set_touch_metrics(&self, cell_width: usize, cell_height: usize, key_row_height: usize) {
         self.with_window_inner(move |inner| {
-            inner.touch.set_cell_height(incr.y as f64);
+            // The surface height is known here and is the space touches arrive
+            // in; the GUI's own window size is not reliably that.
+            let window_height = inner.dimensions.pixel_height as f64;
+            inner.touch.set_window_height(window_height);
+            inner
+                .touch
+                .set_metrics(cell_width as f64, cell_height as f64, key_row_height as f64);
             Ok(())
         });
     }

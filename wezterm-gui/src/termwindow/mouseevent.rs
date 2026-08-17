@@ -69,6 +69,24 @@ impl super::TermWindow {
 
         self.current_mouse_event.replace(event.clone());
 
+        // A horizontal wheel pans the extra-keys row. The gesture layer only
+        // emits one while a drag that began on the row is in progress, so it is
+        // the authority on whether this belongs to the row; testing the
+        // coordinate here instead would need the window size, which is briefly
+        // the size the GUI would like rather than the one touches arrive in.
+        // Panning is still gated on the row having somewhere to go, so a real
+        // horizontal wheel elsewhere is left alone.
+        if let WMEK::HorzWheel(clicks) = event.kind {
+            if self.key_row_max_scroll() > 0. {
+                let step = self.render_metrics.cell_size.width as f32;
+                if self.scroll_key_row(-(clicks as f32) * step) {
+                    self.key_row.take();
+                    context.invalidate();
+                }
+                return;
+            }
+        }
+
         let border = self.get_os_border();
 
         let first_line_offset = if self.show_tab_bar && !self.config.tab_bar_at_bottom {

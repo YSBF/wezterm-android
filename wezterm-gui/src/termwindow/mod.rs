@@ -402,6 +402,18 @@ pub struct TermWindow {
     /// Modifiers armed by tapping them in the extra-keys row, waiting to
     /// be consumed by the next key press from any source.
     key_row_latched: ::window::Modifiers,
+    /// How far the extra-keys row has been panned to the left, in pixels.
+    /// Always zero when every key fits across the window.
+    key_row_scroll: f32,
+    /// The width the row's keys actually occupy, excluding the gaps between
+    /// them, measured from the laid-out element rather than estimated from the
+    /// labels. Zero until the row has been built once.
+    ///
+    /// The title font is proportional, so a label's width is not its character
+    /// count times the nominal cell width; estimating it that way understates
+    /// the row, which then overflows the window while arithmetic based on the
+    /// estimate insists it fits, leaving the trailing keys unreachable.
+    key_row_natural_width: std::cell::Cell<f32>,
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
@@ -729,6 +741,8 @@ impl TermWindow {
             fancy_tab_bar: None,
             key_row: None,
             key_row_latched: ::window::Modifiers::NONE,
+            key_row_scroll: 0.,
+            key_row_natural_width: std::cell::Cell::new(0.),
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),

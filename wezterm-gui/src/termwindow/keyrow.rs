@@ -21,8 +21,9 @@
 //! so that the terminal grid does not draw underneath it.
 
 use crate::termwindow::box_model::{
-    BoxDimension, ComputedElement, Corners, DisplayType, Element, ElementColors, ElementContent,
-    Float, InheritableColor, LayoutContext, SizedPoly, VerticalAlign,
+    BoxDimension, ComputedElement, ComputedElementContent, Corners, DisplayType, Element,
+    ElementColors, ElementContent, Float, InheritableColor, LayoutContext, SizedPoly,
+    VerticalAlign,
 };
 use crate::termwindow::render::corners::{
     BOTTOM_LEFT_ROUNDED_CORNER, BOTTOM_RIGHT_ROUNDED_CORNER, TOP_LEFT_ROUNDED_CORNER,
@@ -159,6 +160,11 @@ const HEIGHT_IN_CELLS: f32 = 2.4;
 /// Horizontal padding either side of a key's label, in pixels.
 const KEY_PADDING: f32 = 1.;
 
+/// The smallest margin between two keys. Once the row is wide enough to need
+/// panning there is no leftover space to share out, but the keys still have to
+/// read as separate tap targets.
+const MIN_KEY_GAP: f32 = 6.;
+
 /// The radius of a key's rounded corners, in cells.
 const KEY_CORNER_CELLS: f32 = 0.25;
 
@@ -179,6 +185,75 @@ impl TermWindow {
         let font = fontconfig.title_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
         Ok((metrics.cell_size.height as f32 * HEIGHT_IN_CELLS).ceil())
+    }
+
+    /// A lower bound on each key's width, and the margin to put between keys.
+    ///
+    /// The width is only a floor: the box model grows a key whose label does
+    /// not fit, which is why the row's true extent is measured after layout
+    /// rather than predicted here.
+    ///
+    /// Whatever room is left over once the keys have their measured width
+    /// becomes the gap, so the row spreads across the window when it can. When
+    /// there is not enough room the gap bottoms out at `MIN_KEY_GAP` and the
+    /// row overflows, to be panned.
+    fn key_row_layout(&self, metrics: &RenderMetrics) -> (Vec<f32>, f32) {
+        let cell_width = metrics.cell_size.width as f32;
+        let label_widths: Vec<f32> = KEYS
+            .iter()
+            .map(|key| key.label().chars().count() as f32 * cell_width)
+            .collect();
+
+        let natural = self.key_row_natural_width();
+        let gap = ((self.dimensions.pixel_width as f32 - natural) / KEYS.len() as f32)
+            .max(MIN_KEY_GAP);
+
+        (label_widths, gap)
+    }
+
+    /// The measured width of the keys themselves, falling back to an estimate
+    /// until the row has been laid out once. The estimate understates a
+    /// proportional font, but it only has to be sane for a single frame.
+    fn key_row_natural_width(&self) -> f32 {
+        let measured = self.key_row_natural_width.get();
+        if measured > 0. {
+            return measured;
+        }
+        let cell_width = match self.fonts.title_font() {
+            Ok(font) => RenderMetrics::with_font_metrics(&font.metrics()).cell_size.width as f32,
+            Err(_) => return 0.,
+        };
+        KEYS.iter()
+            .map(|key| key.label().chars().count() as f32 * cell_width + 2. * KEY_PADDING)
+            .sum()
+    }
+
+    /// How far the row can be panned before its last key reaches the right
+    /// edge of the window. Zero when every key already fits.
+    pub fn key_row_max_scroll(&self) -> f32 {
+        let natural = self.key_row_natural_width.get();
+        if natural <= 0. {
+            return 0.;
+        }
+        let font = match self.fonts.title_font() {
+            Ok(font) => font,
+            Err(_) => return 0.,
+        };
+        let metrics = RenderMetrics::with_font_metrics(&font.metrics());
+        let (_, gap) = self.key_row_layout(&metrics);
+        (natural + gap * KEYS.len() as f32 - self.dimensions.pixel_width as f32).max(0.)
+    }
+
+    /// Pan the row by `delta` pixels, clamped to its extent. Returns true when
+    /// the offset actually moved and the row needs rebuilding.
+    pub fn scroll_key_row(&mut self, delta: f32) -> bool {
+        let max = self.key_row_max_scroll();
+        let next = (self.key_row_scroll + delta).clamp(0., max);
+        if (next - self.key_row_scroll).abs() < f32::EPSILON {
+            return false;
+        }
+        self.key_row_scroll = next;
+        true
     }
 
     pub fn build_key_row(&self) -> anyhow::Result<ComputedElement> {
@@ -204,25 +279,23 @@ impl TermWindow {
         // room rather than extending past it. Counting them here instead
         // reserved space that no key ever occupies, which left the row ending
         // short of the window edge with every key crowded against the left.
-        let cell_width = metrics.cell_size.width as f32;
-        let occupied_besides_label = 2. * KEY_PADDING;
-        let label_widths: Vec<f32> = KEYS
-            .iter()
-            .map(|key| key.label().chars().count() as f32 * cell_width)
-            .collect();
+        let (label_widths, gap) = self.key_row_layout(&metrics);
 
-        let natural: f32 = label_widths
-            .iter()
-            .map(|width| width + occupied_besides_label)
-            .sum();
-        // On a screen too narrow to hold every label the row overflows rather
-        // than shrinking the text, which would be illegible long before it fit.
-        let gap = ((self.dimensions.pixel_width as f32 - natural) / KEYS.len() as f32).max(0.);
+        // When the keys do not fit, the row pans sideways instead of shrinking
+        // the text, which would be illegible long before it fit, or clipping
+        // the tail, which put the soft-keyboard key out of reach entirely.
+        // Shifting the first key's margin carries the whole row with it; the
+        // window edges do the clipping, so no scissor rect is needed.
+        let offset = -self.key_row_scroll.clamp(0., self.key_row_max_scroll());
 
         let children = KEYS
             .iter()
             .zip(&label_widths)
-            .map(|(key, label_width)| self.build_key(*key, &font, *label_width, gap, height))
+            .enumerate()
+            .map(|(idx, (key, label_width))| {
+                let lead = if idx == 0 { offset } else { 0. };
+                self.build_key(*key, &font, *label_width, gap, lead, height)
+            })
             .collect::<Vec<_>>();
 
         let row = Element::new(&font, ElementContent::Children(children))
@@ -260,6 +333,21 @@ impl TermWindow {
             &row,
         )?;
 
+        // Record how wide the keys really are, with the pan and the gaps taken
+        // back out so that the figure describes the keys alone. The next layout
+        // shares out the leftover room from this, and `key_row_max_scroll` uses
+        // it to decide whether there is anything to pan. Measuring beats
+        // predicting because the labels are set in a proportional font.
+        if let ComputedElementContent::Children(keys) = &computed.content {
+            if let Some(last) = keys.last() {
+                let span = last.bounds.max_x() - offset - border.left.get() as f32;
+                let natural = span - gap * KEYS.len() as f32;
+                if natural > 0. {
+                    self.key_row_natural_width.set(natural);
+                }
+            }
+        }
+
         // The row sits at the very bottom, inside the padding reserved for it
         // by effective_bottom_padding.
         computed.translate(euclid::vec2(
@@ -270,12 +358,15 @@ impl TermWindow {
         Ok(computed)
     }
 
+    /// `lead` is added to the left margin, and is non-zero only for the first
+    /// key, where it carries the row's pan offset.
     fn build_key(
         &self,
         key: KeyRowKey,
         font: &std::rc::Rc<wezterm_font::LoadedFont>,
         width: f32,
         gap: f32,
+        lead: f32,
         height: f32,
     ) -> Element {
         let latched = match key {
@@ -296,7 +387,7 @@ impl TermWindow {
             .vertical_align(VerticalAlign::Middle)
             .float(Float::None)
             .margin(BoxDimension {
-                left: Dimension::Pixels(gap / 2.),
+                left: Dimension::Pixels(gap / 2. + lead),
                 right: Dimension::Pixels(gap / 2.),
                 top: Dimension::Pixels(0.),
                 bottom: Dimension::Pixels(0.),

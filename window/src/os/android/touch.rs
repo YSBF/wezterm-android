@@ -55,6 +55,9 @@ enum Phase {
     Undecided,
     /// One finger down and moving; scrolling the viewport.
     Scrolling,
+    /// One finger down and moving, having started on the extra-keys row; the
+    /// row is being panned sideways rather than the viewport scrolled.
+    PanningKeyRow,
     /// Long press fired; the finger is extending a selection.
     Selecting,
     /// Two or more fingers down; tracking a pinch.
@@ -74,6 +77,8 @@ pub struct TouchState {
     /// Accumulated vertical travel that has not yet been converted into whole
     /// wheel clicks.
     scroll_residue: f64,
+    /// The same, for sideways travel while panning the key row.
+    pan_residue: f64,
     /// Velocity in pixels per millisecond, for the fling.
     velocity: f64,
     last_move_at: Option<Instant>,
@@ -82,6 +87,18 @@ pub struct TouchState {
 
     /// Pixels per wheel click; one click should scroll one cell.
     cell_height: f64,
+    /// Pixels per sideways click when panning the key row.
+    cell_width: f64,
+    /// Height of the extra-keys row, or zero when there is none. A touch that
+    /// starts inside it pans the row instead of scrolling the viewport.
+    ///
+    /// The row is located against `window_height` rather than against a top
+    /// edge handed down by the GUI, because the GUI's idea of the window size
+    /// is briefly the size it would *like* -- large enough for a remote pane's
+    /// row count -- rather than the surface these touch coordinates are in.
+    key_row_height: f64,
+    /// Height of the surface, which is the coordinate space touches arrive in.
+    window_height: f64,
     /// Device pixels per dp, for slop thresholds.
     density: f64,
 }
@@ -101,20 +118,42 @@ impl TouchState {
             current: (0., 0.),
             down_at: None,
             scroll_residue: 0.,
+            pan_residue: 0.,
             velocity: 0.,
             last_move_at: None,
             pinch_reference: 0.,
             cell_height: 20.,
+            cell_width: 10.,
+            key_row_height: 0.,
+            window_height: 0.,
             density: density.max(1.0),
         }
     }
 
-    /// Tell the gesture layer how tall a cell is, so that a drag scrolls by a
-    /// believable number of lines. Called whenever the font metrics change.
-    pub fn set_cell_height(&mut self, cell_height: f64) {
+    /// Track the surface height, so that the key row band stays anchored to the
+    /// bottom edge as the window changes size.
+    pub fn set_window_height(&mut self, window_height: f64) {
+        self.window_height = window_height;
+    }
+
+    /// Tell the gesture layer how large a cell is, so that a drag scrolls by a
+    /// believable number of lines, and where the extra-keys row starts. Called
+    /// whenever the font metrics or the window size change.
+    pub fn set_metrics(&mut self, cell_width: f64, cell_height: f64, key_row_height: f64) {
+        if cell_width > 0. {
+            self.cell_width = cell_width;
+        }
         if cell_height > 0. {
             self.cell_height = cell_height;
         }
+        self.key_row_height = key_row_height.max(0.);
+    }
+
+    /// True when a touch at `y` lands on the extra-keys row.
+    fn on_key_row(&self, y: f64) -> bool {
+        self.key_row_height > 0.
+            && self.window_height > 0.
+            && y >= self.window_height - self.key_row_height
     }
 
     fn slop(&self) -> f64 {
@@ -149,6 +188,7 @@ impl TouchState {
         self.down_at = Some(Instant::now());
         self.last_move_at = self.down_at;
         self.scroll_residue = 0.;
+        self.pan_residue = 0.;
         self.velocity = 0.;
 
         // Move the cursor there immediately so that any hover-sensitive UI
@@ -166,14 +206,29 @@ impl TouchState {
                 if self.long_press_elapsed(now) {
                     self.begin_selection(events);
                 } else if self.moved_beyond_slop() {
-                    self.phase = Phase::Scrolling;
+                    // A drag that began on the key row pans the row; the row is
+                    // a strip of buttons, so scrolling the terminal from it
+                    // would be surprising, and it is the only way to reach keys
+                    // that do not fit across the screen.
+                    self.phase = if self.on_key_row(self.origin.1) {
+                        Phase::PanningKeyRow
+                    } else {
+                        Phase::Scrolling
+                    };
                 }
             }
             Phase::Selecting => {
                 events.push(self.mouse_event(MouseEventKind::Move, MouseButtons::LEFT));
             }
-            Phase::Scrolling => {}
+            Phase::Scrolling | Phase::PanningKeyRow => {}
             _ => return,
+        }
+
+        if self.phase == Phase::PanningKeyRow {
+            self.pan_residue += x - prev.0;
+            self.emit_pan_clicks(events);
+            self.last_move_at = Some(now);
+            return;
         }
 
         if self.phase == Phase::Scrolling {
@@ -349,6 +404,20 @@ impl TouchState {
             MouseEventKind::Release(MousePress::Left),
             MouseButtons::NONE,
         ));
+    }
+
+    /// Convert sideways travel on the key row into horizontal wheel clicks, one
+    /// per cell width. The GUI pans the row by the same quantum, so the row
+    /// tracks the finger.
+    fn emit_pan_clicks(&mut self, events: &mut Vec<WindowEvent>) {
+        while self.pan_residue.abs() >= self.cell_width {
+            let direction = if self.pan_residue > 0. { 1 } else { -1 };
+            self.pan_residue -= direction as f64 * self.cell_width;
+            events.push(self.mouse_event(
+                MouseEventKind::HorzWheel(direction as i16),
+                MouseButtons::NONE,
+            ));
+        }
     }
 
     fn emit_wheel_clicks(&mut self, events: &mut Vec<WindowEvent>) {

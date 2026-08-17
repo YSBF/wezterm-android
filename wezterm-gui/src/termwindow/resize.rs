@@ -306,6 +306,8 @@ impl super::TermWindow {
         // outside the new surface entirely. Raising the soft keyboard shrinks
         // the window enough for the row to disappear off the bottom.
         self.key_row.take();
+        // A wider window may leave the row with nothing left to pan.
+        self.key_row_scroll = self.key_row_scroll.clamp(0., self.key_row_max_scroll());
         self.update_title();
 
         window.set_resize_increments(if self.config.use_resize_increments {
@@ -313,6 +315,17 @@ impl super::TermWindow {
         } else {
             ResizeIncrement::disabled()
         });
+
+        // A touch backend quantises gestures against the cell size, and has to
+        // know where the key row starts so that a drag there pans the row
+        // rather than scrolling the terminal. This cannot ride along on the
+        // resize increments above, which are a disabled sentinel unless the
+        // user opted into them.
+        window.set_touch_metrics(
+            self.render_metrics.cell_size.width.max(1) as usize,
+            self.render_metrics.cell_size.height.max(1) as usize,
+            self.key_row_pixel_height().unwrap_or(0.).max(0.) as usize,
+        );
 
         // Queue up a speculative resize in order to preserve the number of rows+cols
         if let Some(cell_dims) = scale_changed_cells {
