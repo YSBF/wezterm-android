@@ -2,7 +2,7 @@
 
 ## Status
 
-**Design proposal, revision 2.** This document describes the next user-interface
+**Design proposal, revision 3.** This document describes the next user-interface
 layer for the Android port: an in-terminal SSH host sidebar and a more usable
 extra-keys row.  It does not change the existing terminal renderer, mux, or
 Android activity architecture.
@@ -10,11 +10,17 @@ Android activity architecture.
 ## Revision history
 
 * **rev 1** (`6334bc7cb`) --- the proposal as originally written.
-* **rev 2** --- reconciled with the extra-keys behavior that has since shipped;
-  corrected the key-row sizing rules, which rev 1 stated in a form that cannot
-  be satisfied on a phone; added the credential and host-key prompts the connect
-  flow requires; resolved rev 1's open question about the runtime domain API;
-  and recorded the window-geometry hazard that the pinned sidebar will hit.
+* **rev 2** (`b879893cf`) --- reconciled with the extra-keys behavior that has
+  since shipped; corrected the key-row sizing rules, which rev 1 stated in a
+  form that cannot be satisfied on a phone; added the credential and host-key
+  prompts the connect flow requires; answered rev 1's open question about the
+  runtime domain API; and recorded the window-geometry hazard that the pinned
+  sidebar will hit.
+* **rev 3** --- corrected rev 2's connect path, which named the wrong mechanism;
+  specified domain lifecycle across edit and reconnect, which no revision had
+  addressed; settled modifier ownership and the armed-to-locked transition,
+  which rev 2 left contradictory and incomplete; and added the clipping and
+  hit-test work that a pinned cluster requires and rev 2 assumed away.
 
 ## Decision summary
 
@@ -74,9 +80,14 @@ The double rule in the key row marks the boundary between the pinned cluster and
 the scrolling remainder; see below.
 
 The `[menu]` affordance shares the tab bar with the tab strip and the new-tab
-button.  The tab bar now divides its width between tabs rather than squashing
-them, so the menu button must be accounted for in that division rather than
-drawn over it.
+button, so it must be accounted for in however the bar divides its width rather
+than drawn over the result.
+
+Note that the change which makes the bar share its width between tabs rather
+than squashing them (`d801161fb`) is **not** on this branch --- it currently
+lives only on `fix-remote-tab-focus-pingpong`.  Whether the menu button lands in
+that division or in the older squashing layout depends on whether the branches
+have merged by phase 4.  Check before implementing rather than assuming.
 
 ### Sidebar modes
 
@@ -122,16 +133,22 @@ adb: `HOME` is the application-private data directory, and release builds are
 not debuggable, so `run-as` is refused and there is no supported path for a user
 to place a private key there.
 
-Resolve it one of two ways, and say which:
+The decision is **accept a pasted key**: the native dialog gains a multi-line
+field, and Rust writes the key into app-private storage with `0600`.  This needs
+no Storage Access Framework picker and no new permission, and it keeps key
+authentication --- the only form worth using against a real server --- available
+in the first release.  A file picker remains out of scope.
 
-1. **v1 is password-only.**  Drop the key reference from the first release and
-   state it plainly, or
-2. **accept a pasted key.**  The native dialog gains a multi-line field; Rust
-   writes the key into app-private storage with `0600`.  This needs no Storage
-   Access Framework picker and no new permission, and is the cheaper of the two
-   to build.
-
-A file picker remains out of scope either way.
+This does pull a private key through the clipboard, which is in tension with the
+credential dialog's rule against clipboard use.  The tension is accepted, because
+the alternative is no key support at all, but it must be handled rather than
+ignored: on Android 13 and later the clipboard is surfaced in a system preview
+and retained in clipboard history, and a cloud-syncing IME may see it too.  So
+the import field clears the clipboard after a successful import, marks itself
+sensitive so the system preview does not display the contents, and the UI states
+plainly that the key passed through the clipboard.  Generating a key on-device,
+which avoids the clipboard entirely, is the better long-term answer and is out of
+scope here.
 
 ## Extra-keys row
 
@@ -169,9 +186,15 @@ scroll, or to pin the keys that must never move and scroll the rest.  The third
 is the only one that keeps both the 44 dp floor and direct reachability of the
 arrows, so it is the design.
 
-The pinned cluster is five keys at 48 dp = 240 dp, leaving about 150 dp --- three
-keys at the minimum size --- visible in the scrolling region at rest, with the
-remainder a short pan away.
+As an estimate, the pinned cluster is five keys at 48 dp = 240 dp, leaving about
+150 dp --- roughly three keys at the minimum size --- visible in the scrolling
+region at rest, with the remainder a short pan away.
+
+That arithmetic is an estimate and nothing may depend on it, for the same reason
+the row measures itself: 48 dp is a floor, and a key whose label needs more grows
+past it.  The boundary between the pinned cluster and the scrolling region is
+computed from the measured width of the pinned keys at layout time, never from
+the nominal target.
 
 ### Key behavior
 
@@ -184,27 +207,51 @@ remainder a short pan away.
 Rev 1 specified modifiers that stay on until tapped again.  That is a footgun on
 a touch screen: an accidental `CTRL` silently corrupts everything typed
 afterwards, and the existing one-shot latch was chosen precisely so that a
-mis-tap has a cheap escape.  Rev 2 adopts the conventional three-state model
-instead:
+mis-tap has a cheap escape.  The model is three-state, and **each state is
+reached by the same tap**:
 
-* **tap** --- armed for one key event, then cleared;
-* **long press or double tap** --- locked until cleared;
-* **tap while locked** --- cleared.
+```
+off  --tap-->  armed  --tap-->  locked  --tap-->  off
+                 |
+                 +-- consumed by one key event --> off
+```
+
+Rev 2 assigned locking to a long press or double tap and left a tap on an
+already-armed modifier undefined, which is the ambiguity that turns into an
+argument on the device.  Cycling removes it, and costs nothing:
+
+* the touch layer has **no** double-tap recognition today, and adding it means
+  delaying the dispatch of every tap by the double-tap interval, which is a real
+  latency regression on the most common interaction in the row;
+* long press in the row is already spoken for --- see the gesture section --- so
+  overloading it for lock would need that conflict resolved first.
 
 Armed and locked must be visually distinct from each other and from off.  A
 single "active" color, as rev 1 specified, cannot express the difference between
 "this applies to the next key" and "this applies until you stop it".
 
-Modifier state survives soft-keyboard visibility changes and opening the
-sidebar, and must not leak across a change of active pane or tab.
+#### Ownership
 
-Rev 1 said the state is per pane without saying what owns it.  Today it is a
-single `Modifiers` on `TermWindow`.  Keying it by pane requires an entry
-lifetime --- entries must be dropped when a pane closes, or the map accumulates
-state for dead panes for the life of the window.  Per-pane is also worth
-justifying rather than assuming: it means switching panes silently changes
-modifier state, where per-window matches how an attached physical keyboard
-behaves.  Decide this before phase 1 rather than during it.
+Rev 1 said the state is per pane.  Rev 2 required that it "must not leak across
+a change of active pane or tab" and then reopened per-pane versus per-window as
+undecided, which is a contradiction: the requirement is the decision.
+
+It is settled here as **one mask per window, cleared when the active pane or tab
+changes**.  It stays a single `Modifiers` on `TermWindow`, as today.
+
+This satisfies the no-leak requirement exactly, and it is strictly better than a
+per-pane map for this feature:
+
+* no map, so no entry lifetime and no accumulation of state keyed by panes that
+  have closed;
+* clearing on focus change is also the safer default under the mis-tap
+  philosophy above --- an armed modifier the user has forgotten about does not
+  survive a context switch;
+* it matches how an attached physical keyboard behaves, where per-pane modifier
+  state would be surprising.
+
+Modifier state survives soft-keyboard visibility changes and opening the
+sidebar; only a change of active pane or tab clears it.
 
 ### Touch and layout rules
 
@@ -213,7 +260,18 @@ behaves.  Decide this before phase 1 rather than during it.
   that cost is accepted.
 * The pinned cluster is always visible and never pans.
 * The scrolling region pans horizontally, clamped at both ends, and its position
-  is preserved while the row is rebuilt for a latch change.
+  is preserved while the row is rebuilt for a modifier state change.
+* **The scrolling region must be clipped to its own rectangle.**  The row that
+  shipped pans by shifting the first key's left margin and lets the window edges
+  do the clipping, which needs no scissor rect because the only overflow is off
+  the screen.  A pinned cluster breaks that: a key panned to the left of the
+  boundary has nowhere to go and will be drawn on top of, or underneath, the
+  pinned keys.  The scrolling region therefore needs a real clip, which is the
+  one genuinely new rendering mechanism in this phase.
+* Hit testing must respect the same boundary.  UI items are resolved by taking
+  the last match in the list, so a scrolled key that has slid under a pinned key
+  will otherwise steal its taps --- a `CTRL` that intermittently types `ESC` is
+  the exact failure this prevents.
 * The row retains theme-aware normal, pressed, armed, and locked colors.
 * Pressed feedback must be immediate.  Haptics can be considered after the
   interaction model is verified on-device.
@@ -246,12 +304,34 @@ panning.  Both require the gesture layer to know which region owns a drag, and
 that layer currently carries hard-coded knowledge of the key row's height.  A
 third such widget would mean a third special case.
 
-Introduce a small region registry instead: the GUI publishes the rectangles that
-claim gestures along with what each does with them, and the touch layer routes on
-that.  Do this as part of the sidebar work rather than after it.
+Introduce a small region registry: the GUI publishes the regions that claim
+gestures along with what each does with them, and the touch layer routes on that.
 
-Regions are published as sizes, not absolute positions, and the backend places
-them --- see below for why.
+**This is needed in phase 1, not phase 4.**  Long press is currently unconditional
+--- `poll_long_press` begins a text selection wherever the finger is, with no
+notion of region --- so a long press on the extra-keys row starts selecting
+terminal text behind a strip of buttons.  That is wrong today, and phase 1 cannot
+land a correct row without fixing it.  The registry is the fix; the sidebar is
+its second consumer, not its first.
+
+A region declares:
+
+* an **anchor edge** and its extent along both axes.  Rev 2 said regions are
+  published as sizes rather than positions, which is true of a bottom-anchored
+  full-width row and not general: the sidebar is left-anchored, has a width *and*
+  a vertical extent, and needs to state whether it begins below the tab bar and
+  ends above the key row.  The backend still does the placing --- see the
+  viewport section for why --- but it needs the anchor to do it.
+* which gestures it **claims** (drag along an axis, long press, tap) and which it
+  **declines**, so that a declined gesture falls through to the terminal rather
+  than being swallowed.
+* a **priority**, because regions overlap: an open overlay sidebar sits above the
+  terminal and above part of the key row.
+
+An open sidebar is not only its own rectangle.  The dimmed area outside it must
+route taps to "close", so opening the sidebar changes gesture routing for the
+whole surface, not just for the drawer.  Model that as a full-surface region at
+a lower priority than the drawer itself, published while the sidebar is open.
 
 ### Terminal viewport rectangle
 
@@ -296,20 +376,70 @@ app-private storage and `run-as` is refused when the package is not debuggable.
 The UI is therefore the only editor it will ever have, which makes an export and
 a reset path part of the feature rather than a nicety.
 
+Export is a share intent (`ACTION_SEND`) carrying the serialized host list,
+which needs no storage permission and no file picker, and lets the user send it
+to wherever they keep things.  It must exclude anything secret: profiles only,
+never a key or a password.  Reset deletes the file and reloads an empty
+repository.
+
 ### Connecting a stored profile
 
-Rev 1 left this as an open question.  It is answered: a profile can be connected
-at runtime without touching `wezterm.lua` and without an app restart.
+Rev 1 left this open; rev 2 answered it with the wrong mechanism.  There are two
+distinct SSH paths and they are not interchangeable:
 
-* `Mux::add_domain` (`mux/src/lib.rs:746`) registers a domain on a live mux, and
-  `Mux::iter_domains` (`:1076`) enumerates what is registered.
-* A `SshDomain` is a plain config struct that can be built at runtime and
-  converted with `mux::ssh::ssh_domain_to_ssh_config`.
-* `wezterm-client`'s `ssh_connect` is the client path, and is what the existing
-  `ssh_domains` configuration already drives.
+| `SshDomain.multiplexing` | Domain type | Requires on the remote host |
+| --- | --- | --- |
+| `None` | `RemoteSshDomain` (`mux/src/ssh.rs:180`) | nothing but an sshd |
+| `WezTerm` | `ClientDomain`, via `wezterm-client`'s `ssh_connect` | a `wezterm` binary, run as `wezterm cli proxy` |
 
-So the adapter is a conversion from `HostProfile` to `SshDomain` plus an
-`add_domain` call.  The repository stays independent of `wezterm.lua`.
+Rev 2 cited `ssh_connect` as "the client path".  That is the multiplexing
+flavor: it computes `wezterm_bin_path` and executes `wezterm cli proxy` on the
+far end, so it fails against an ordinary server.  A sidebar host profile is an
+ordinary SSH login and **must** map to `multiplexing: SshMultiplexing::None`.
+
+`update_mux_domains_impl` (`wezterm-mux-server-impl/src/lib.rs:39`) is the
+existing precedent for registering both flavors from configuration, and
+`run_ssh` (`wezterm-gui/src/lib.rs:178`) is the minimal example of the plain
+one:
+
+```rust
+let domain = Arc::new(mux::ssh::RemoteSshDomain::with_ssh_domain(&dom)?);
+mux.add_domain(&domain);
+```
+
+So the adapter is a conversion from `HostProfile` to `SshDomain` with
+`multiplexing: None`, then `RemoteSshDomain::with_ssh_domain` and
+`Mux::add_domain` (`mux/src/lib.rs:746`).  No `wezterm.lua` rewrite and no app
+restart.  A future "remote WezTerm mux" profile type can opt into the other row
+of that table, but it is not the first release.
+
+#### Domain lifecycle
+
+Registration is not reversible and not idempotent in the way the UI needs.
+
+* `Mux` has `add_domain` and `get_domain_by_name` (`:742`) but **no removal**.  A
+  domain lives for the life of the process.
+* `update_mux_domains_impl` guards with `if mux.get_domain_by_name(..).is_some()
+  { continue; }`.  Registration keyed by name is therefore first-write-wins, and
+  silently so.
+
+The consequence is a defect waiting to be built: connect to a host, disconnect,
+edit its port, reconnect --- and the second connection uses the *first*
+domain's configuration, because the name already exists and the new config is
+dropped on the floor.  Nothing reports this.
+
+The first release resolves it by never reusing a name.  A `HostProfile` carries
+a stable identifier and a generation counter; the domain name is derived from
+both, so editing a profile yields a name that has never been registered.  The
+sidebar displays the profile's display name, not the domain name, so this stays
+invisible.
+
+The cost is that dead domains accumulate for the life of the process.  That is
+acceptable for a first release --- they are small, and the alternative is a
+removal API upstream in `Mux` --- but it must be a recorded decision rather than
+an accident, and a long-lived session that edits profiles repeatedly is the case
+to watch during phase 6.  Adding `Mux::remove_domain` upstream is the eventual
+fix and is out of scope here.
 
 ### Connection lifecycle and prompts
 
@@ -357,13 +487,17 @@ bug rather than as one of the connection states phase 5 renders.
 ## Implementation phases
 
 1. **Extra-keys state and layout**
-   * Decide per-pane versus per-window modifier ownership, and the entry
-     lifetime if per-pane.
-   * Separate momentary keys from three-state modifier keys; merge the modifier
-     mask at the common key dispatch point, covering IME commits, on-screen key
+   * Introduce the gesture region registry, and use it to stop long press inside
+     the row from beginning a text selection.  This is a prerequisite for the
+     rest of the phase, not a later tidy-up.
+   * Separate momentary keys from cycling modifier keys (off, armed, locked);
+     keep one mask per window and clear it on pane or tab focus change; merge it
+     at the common key dispatch point, covering IME commits, on-screen key
      actions, and physical keyboard events.
-   * Split the row into the pinned cluster and the scrolling remainder; remove
-     `PgUp` and `PgDn`; raise targets to 44--48dp.
+   * Split the row into the pinned cluster and the scrolling remainder, with the
+     boundary taken from measured widths; clip the scrolling region and order
+     hit testing so a scrolled key cannot take a tap meant for a pinned one.
+   * Remove `PgUp` and `PgDn`; raise targets to 44--48dp.
    * Add visual states for armed and locked, and regression tests for IME and
      physical-keyboard input.
 
@@ -371,7 +505,10 @@ bug rather than as one of the connection states phase 5 renders.
    * Define `HostProfile`, validation, CRUD operations, and atomic private
      storage, with export and reset.
    * Read existing configured SSH domains for display without editing them.
-   * Implement the `HostProfile` to `SshDomain` adapter over `Mux::add_domain`.
+   * Implement the `HostProfile` to `SshDomain` adapter with
+     `multiplexing: None`, over `RemoteSshDomain` and `Mux::add_domain`, with
+     generation-derived domain names so an edited profile never collides with
+     the domain its previous version registered.
    * Fix the exit-on-failed-connection defect.
 
 3. **Prompts and the native dialog boundary**
@@ -383,8 +520,9 @@ bug rather than as one of the connection states phase 5 renders.
 4. **Rust-rendered sidebar, overlay only**
    * Implement the state machine, tab-bar entry point, overlay, and close
      behavior.
-   * Introduce the gesture region registry and render a scrollable host list
-     with add, edit, delete, and connect actions.
+   * Extend the gesture registry from phase 1 with anchor edges, priority, and
+     the full-surface tap-to-close region; render a scrollable host list with
+     add, edit, delete, and connect actions.
    * Invalidate the sidebar's cached element tree on atlas recreation.
 
 5. **Pinned mode**
@@ -400,6 +538,10 @@ bug rather than as one of the connection states phase 5 renders.
      with both IME and Bluetooth keyboards.
    * Test first-connect host key verification, a deliberately mismatched host
      key, and a failed connection.
+   * Edit a connected profile's port and reconnect, confirming the new
+     configuration is used rather than the domain registered by the previous
+     version, and watch domain accumulation across a long session of repeated
+     edits.
    * Test sidebar transitions while output is active and while the app is
      backgrounded, then validate terminal and PTY resize behavior in pinned
      mode.
