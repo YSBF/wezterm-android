@@ -46,6 +46,7 @@ mod customglyph;
 mod download;
 mod frontend;
 mod glyphcache;
+pub mod hosts;
 mod inputmap;
 mod overlay;
 mod quad;
@@ -786,7 +787,7 @@ fn run_terminal_gui(opts: StartCommand, default_domain_name: Option<String>) -> 
 
     promise::spawn::spawn(async move {
         if let Err(err) = async_run_terminal_gui(cmd, opts, publish.should_publish()).await {
-            terminate_with_error(err);
+            report_gui_startup_error(err).await;
         }
         drop(activity);
     })
@@ -794,6 +795,73 @@ fn run_terminal_gui(opts: StartCommand, default_domain_name: Option<String>) -> 
 
     maybe_show_configuration_error_window();
     gui.run_forever()
+}
+
+/// Report a failure in the startup path.
+///
+/// On the desktop this is fatal, and rightly so: the process was started to do
+/// one particular thing, from a shell that will show the message.
+///
+/// On Android it must not be. The process is an app rather than a command, and
+/// `std::process::exit` there subverts the Activity lifecycle: the app vanished
+/// about twenty seconds after launch with nothing on screen and only the
+/// teardown abort in logcat. A remote `default_domain` that cannot be reached is
+/// also routine on a phone rather than exceptional -- the network comes and goes
+/// -- so the failure is reported and the app is left usable instead.
+async fn report_gui_startup_error(err: anyhow::Error) {
+    if !cfg!(target_os = "android") {
+        terminate_with_error(err);
+    }
+
+    let message = format!("{err:#}");
+    log::error!("startup failed: {message}");
+
+    let ui = mux::connui::ConnectionUI::new_with_no_close_delay();
+    ui.title("wezterm: could not start");
+    ui.output_str(&format!("{}\n\n", textwrap::fill(&message, 78)));
+
+    if let Err(err) = spawn_fallback_local_tab().await {
+        // Nothing left to fall back to, but the message above is on screen and
+        // the process is still alive, which beats vanishing.
+        log::error!("could not open a local tab after the startup failure: {err:#}");
+    }
+}
+
+/// Put a local shell in front of the user after the configured startup failed.
+///
+/// The startup path creates an empty mux window before it tries to connect, so
+/// prefer that one: spawning into a new window instead would leave a blank
+/// window sitting beside the shell.
+async fn spawn_fallback_local_tab() -> anyhow::Result<()> {
+    let mux = Mux::get();
+
+    let domain = mux
+        .get_domain_by_name("local")
+        .ok_or_else(|| anyhow!("no local domain to fall back to"))?;
+
+    let window_id = mux
+        .iter_windows()
+        .into_iter()
+        .find(|id| {
+            mux.get_window(*id)
+                .map(|window| window.is_empty())
+                .unwrap_or(false)
+        })
+        .unwrap_or_else(|| *mux.new_empty_window(None, None));
+
+    domain.attach(Some(window_id)).await?;
+
+    let config = config::configuration();
+    let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+    domain
+        .spawn(
+            config.initial_size(dpi as u32, Some(cell_pixel_dims(&config, dpi)?)),
+            None,
+            None,
+            window_id,
+        )
+        .await?;
+    Ok(())
 }
 
 fn fatal_toast_notification(title: &str, message: &str) {
