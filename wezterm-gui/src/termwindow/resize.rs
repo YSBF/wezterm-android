@@ -304,8 +304,6 @@ impl super::TermWindow {
         // outside the new surface entirely. Raising the soft keyboard shrinks
         // the window enough for the row to disappear off the bottom.
         self.key_row.take();
-        // A wider window may leave the row with nothing left to pan.
-        self.key_row_scroll = self.key_row_scroll.clamp(0., self.key_row_max_scroll());
         self.update_title();
 
         window.set_resize_increments(if self.config.use_resize_increments {
@@ -526,7 +524,7 @@ impl super::TermWindow {
         let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
         let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
         let key_row_height =
-            Self::key_row_pixel_height_impl(&config, &fontconfig, &render_metrics)?;
+            Self::key_row_pixel_height_impl(&config, &fontconfig, self.dimensions.dpi as f64)?;
         let padding_bottom = effective_bottom_padding(&config, v_context, key_row_height);
 
         let dimensions = Dimensions {

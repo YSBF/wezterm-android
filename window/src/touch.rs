@@ -460,6 +460,11 @@ impl TouchState {
             MouseEventKind::Release(MousePress::Left),
             MouseButtons::NONE,
         ));
+        // A finger that has lifted is not hovering anything. Without this the
+        // GUI keeps resolving the last touch point against its UI items, so the
+        // key that was tapped holds its pressed colours until something else
+        // moves the pointer -- which, on a touch screen, is the next tap.
+        events.push(WindowEvent::MouseLeave);
     }
 
     fn emit_wheel_clicks(&mut self, events: &mut Vec<WindowEvent>) {
@@ -556,6 +561,22 @@ mod test {
         // reaches the row's own hit testing.
         events.clear();
         touch.pointer_up(100., on_row(), &mut events);
+        assert_eq!(presses(&events), 1);
+    }
+
+    #[test]
+    fn a_lifted_finger_stops_hovering() {
+        // Without this the GUI resolves the last touch point against its UI
+        // items forever, so the key that was tapped keeps its pressed colours
+        // until the next tap moves the point.
+        let mut touch = state_with_key_row();
+        let mut events = vec![];
+        touch.pointer_down(100., on_row(), &mut events);
+        events.clear();
+        touch.pointer_up(100., on_row(), &mut events);
+
+        assert!(matches!(events.last(), Some(WindowEvent::MouseLeave)));
+        // And the leave comes after the click, not instead of it.
         assert_eq!(presses(&events), 1);
     }
 

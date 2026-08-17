@@ -397,24 +397,22 @@ pub struct TermWindow {
     show_scroll_bar: bool,
     tab_bar: TabBarState,
     fancy_tab_bar: Option<box_model::ComputedElement>,
-    /// The extra-keys row; see keyrow.rs. Rebuilt whenever a modifier
-    /// latch changes, which is why it is cached separately from the tab bar.
-    key_row: Option<box_model::ComputedElement>,
-    /// Modifiers armed by tapping them in the extra-keys row, waiting to
-    /// be consumed by the next key press from any source.
-    key_row_latched: ::window::Modifiers,
-    /// How far the extra-keys row has been panned to the left, in pixels.
-    /// Always zero when every key fits across the window.
-    key_row_scroll: f32,
-    /// The width the row's keys actually occupy, excluding the gaps between
-    /// them, measured from the laid-out element rather than estimated from the
-    /// labels. Zero until the row has been built once.
+    /// The extra-keys row; see keyrow.rs. Rebuilt whenever a modifier state
+    /// changes, which is why it is cached separately from the tab bar.
+    key_row: Option<keyrow::KeyRowLayout>,
+    /// Modifiers armed or locked by tapping them in the extra-keys row.
     ///
-    /// The title font is proportional, so a label's width is not its character
-    /// count times the nominal cell width; estimating it that way understates
-    /// the row, which then overflows the window while arithmetic based on the
-    /// estimate insists it fits, leaving the trailing keys unreachable.
-    key_row_natural_width: std::cell::Cell<f32>,
+    /// One set per window, not a map per pane: see the ownership note in
+    /// keyrow.rs.
+    key_row_modifiers: keyrow::KeyRowModifiers,
+    /// The pane that was active when the row's modifiers were last set.
+    ///
+    /// The state must not survive a change of active pane, and this is what
+    /// detects one. See `expire_key_row_modifiers`.
+    key_row_modifier_pane: Option<mux::pane::PaneId>,
+    /// How far the extra-keys row's panning region has been dragged to the
+    /// left, in pixels. Always zero when every key fits across the window.
+    key_row_scroll: f32,
     pub right_status: String,
     pub left_status: String,
     last_ui_item: Option<UIItem>,
@@ -673,7 +671,7 @@ impl TermWindow {
         };
         let padding_top = config.window_padding.top.evaluate_as_pixels(v_context) as usize;
         let key_row_height =
-            Self::key_row_pixel_height_impl(&config, &fontconfig, &render_metrics).unwrap_or(0.);
+            Self::key_row_pixel_height_impl(&config, &fontconfig, dpi as f64).unwrap_or(0.);
         let padding_bottom = resize::effective_bottom_padding(&config, v_context, key_row_height);
 
         let mut dimensions = Dimensions {
@@ -740,9 +738,9 @@ impl TermWindow {
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
             key_row: None,
-            key_row_latched: ::window::Modifiers::NONE,
+            key_row_modifiers: keyrow::KeyRowModifiers::default(),
+            key_row_modifier_pane: None,
             key_row_scroll: 0.,
-            key_row_natural_width: std::cell::Cell::new(0.),
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),

@@ -13,8 +13,15 @@ impl crate::TermWindow {
         if !crate::termwindow::keyrow::key_row_enabled(&self.config) {
             return Ok(());
         }
+        // The row must not draw a modifier as armed for a pane that is no
+        // longer active. The other half of this check is where the modifiers
+        // are consumed; see `expire_key_row_modifiers`.
+        if self.expire_key_row_modifiers() {
+            self.key_row.take();
+        }
         if self.key_row.is_none() {
             let row = self.build_key_row()?;
+            self.key_row_scroll = row.scroll;
             self.key_row.replace(row);
         }
         self.ui_items.append(&mut self.paint_key_row()?);

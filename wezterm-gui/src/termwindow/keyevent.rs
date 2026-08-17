@@ -602,15 +602,28 @@ impl super::TermWindow {
             None => return,
         };
 
-        // Fold in any modifiers armed from the extra-keys row. This has to
+        // Fold in the extra-keys row's armed and locked modifiers. This has to
         // happen here rather than in the backend because a soft keyboard
         // delivers characters through the IME with no modifier information at
-        // all, and this is the one point every key press passes through.
-        if !self.key_row_latched.is_empty() && window_key.key_is_down {
-            let latched = self.take_key_row_latch();
-            window_key.modifiers |= latched;
-            self.key_row.take();
-            context.invalidate();
+        // all, and this is the one point every key press passes through --
+        // physical keyboard, IME commit, and the row's own keys alike.
+        if !self.key_row_modifiers.is_empty() && window_key.key_is_down {
+            // An armed modifier the user has forgotten about must not follow
+            // them into another pane.
+            if self.expire_key_row_modifiers() {
+                self.key_row.take();
+                context.invalidate();
+            } else {
+                // Only an armed modifier changes what the row looks like when
+                // it is consumed; a locked one would otherwise rebuild the row
+                // on every keystroke.
+                let redraw = self.key_row_modifiers.has_armed();
+                window_key.modifiers |= self.take_key_row_modifiers();
+                if redraw {
+                    self.key_row.take();
+                    context.invalidate();
+                }
+            }
         }
 
         // The leader key is a kind of modal modifier key.

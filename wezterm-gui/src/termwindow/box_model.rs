@@ -7,7 +7,8 @@ use crate::termwindow::{
     ColorEase, MouseCapture, RenderState, TermWindowNotif, UIItem, UIItemType,
 };
 use crate::utilsprites::RenderMetrics;
-use ::window::{RectF, WindowOps};
+use ::window::bitmaps::TextureRect;
+use ::window::{PointF, RectF, SizeF, WindowOps};
 use anyhow::anyhow;
 use config::{Dimension, DimensionContext};
 use finl_unicode::grapheme_clusters::Graphemes;
@@ -423,7 +424,69 @@ pub struct ComputedElement {
     pub content_rect: RectF,
     pub baseline: f32,
 
+    /// Restricts this element and its children to a rectangle, in the same
+    /// window coordinates as `bounds`. Set after layout by a caller that pans
+    /// content within a fixed viewport; nothing in `compute_element` produces
+    /// one.
+    ///
+    /// The clip bounds both the rendering and the `UIItem`s. Clipping the hit
+    /// rectangles is not decoration: a scrolled key that has slid under a
+    /// pinned one would otherwise still answer taps in the pinned key's
+    /// rectangle, which is a `CTRL` that intermittently types `ESC`.
+    pub clip: Option<RectF>,
+
     pub content: ComputedElementContent,
+}
+
+/// The overlap of two clips, either of which may be absent.
+fn intersect_clip(outer: Option<RectF>, inner: Option<RectF>) -> Option<RectF> {
+    match (outer, inner) {
+        (Some(outer), Some(inner)) => Some(outer.intersection(&inner).unwrap_or_else(RectF::zero)),
+        (Some(rect), None) | (None, Some(rect)) => Some(rect),
+        (None, None) => None,
+    }
+}
+
+/// Trim a textured quad to `clip`, in the destination's own coordinate space.
+///
+/// Both the destination rectangle and the texture rectangle are cut by the same
+/// fractions, so the surviving part of the sprite lands exactly where it would
+/// have without the clip. Returns `None` when nothing of it survives.
+fn clip_textured_quad(
+    dest: RectF,
+    tex: TextureRect,
+    clip: Option<RectF>,
+) -> Option<(RectF, TextureRect)> {
+    let clip = match clip {
+        Some(clip) => clip,
+        None => return Some((dest, tex)),
+    };
+
+    if dest.width() <= 0. || dest.height() <= 0. {
+        return None;
+    }
+
+    let trimmed = clip.intersection(&dest)?;
+    if trimmed.width() <= 0. || trimmed.height() <= 0. {
+        return None;
+    }
+    if trimmed == dest {
+        return Some((dest, tex));
+    }
+
+    let fx0 = (trimmed.min_x() - dest.min_x()) / dest.width();
+    let fx1 = (trimmed.max_x() - dest.min_x()) / dest.width();
+    let fy0 = (trimmed.min_y() - dest.min_y()) / dest.height();
+    let fy1 = (trimmed.max_y() - dest.min_y()) / dest.height();
+
+    let tex = euclid::rect(
+        tex.min_x() + tex.width() * fx0,
+        tex.min_y() + tex.height() * fy0,
+        tex.width() * (fx1 - fx0),
+        tex.height() * (fy1 - fy0),
+    );
+
+    Some((trimmed, tex))
 }
 
 impl ComputedElement {
@@ -432,6 +495,10 @@ impl ComputedElement {
         self.border_rect = self.border_rect.translate(delta);
         self.padding = self.padding.translate(delta);
         self.content_rect = self.content_rect.translate(delta);
+        // The clip is in the same coordinates as the rest, so it moves too.
+        // A caller that wants a clip fixed in the window sets it after any
+        // translation.
+        self.clip = self.clip.map(|clip| clip.translate(delta));
 
         match &mut self.content {
             ComputedElementContent::Children(kids) => {
@@ -444,28 +511,49 @@ impl ComputedElement {
         }
     }
 
+    /// Restrict this element and everything under it to `clip`, in window
+    /// coordinates.
+    pub fn set_clip(&mut self, clip: RectF) {
+        self.clip = Some(match self.clip {
+            Some(existing) => existing.intersection(&clip).unwrap_or_else(RectF::zero),
+            None => clip,
+        });
+    }
+
     pub fn ui_items(&self) -> Vec<UIItem> {
         let mut items = vec![];
-        self.ui_item_impl(&mut items);
+        self.ui_item_impl(&mut items, None);
         items
     }
 
-    fn ui_item_impl(&self, items: &mut Vec<UIItem>) {
+    fn ui_item_impl(&self, items: &mut Vec<UIItem>, clip: Option<RectF>) {
+        let clip = intersect_clip(clip, self.clip);
+
         if let Some(item_type) = &self.item_type {
-            items.push(UIItem {
-                x: self.bounds.min_x().max(0.) as usize,
-                y: self.bounds.min_y().max(0.) as usize,
-                width: self.bounds.width().max(0.) as usize,
-                height: self.bounds.height().max(0.) as usize,
-                item_type: item_type.clone(),
-            });
+            let bounds = match clip {
+                Some(clip) => clip.intersection(&self.bounds).unwrap_or_else(RectF::zero),
+                None => self.bounds,
+            };
+            // A hit rectangle clipped away to nothing is not published at all,
+            // rather than published as a zero-sized one: UIItem::hit_test uses
+            // inclusive bounds, so an empty rectangle still matches its own
+            // corner.
+            if bounds.width() > 0. && bounds.height() > 0. {
+                items.push(UIItem {
+                    x: bounds.min_x().max(0.) as usize,
+                    y: bounds.min_y().max(0.) as usize,
+                    width: bounds.width().max(0.) as usize,
+                    height: bounds.height().max(0.) as usize,
+                    item_type: item_type.clone(),
+                });
+            }
         }
 
         match &self.content {
             ComputedElementContent::Text(_) => {}
             ComputedElementContent::Children(kids) => {
                 for kid in kids {
-                    kid.ui_item_impl(items);
+                    kid.ui_item_impl(items, clip);
                 }
             }
             ComputedElementContent::Poly { .. } => {}
@@ -681,6 +769,7 @@ impl super::TermWindow {
                     border_rect: rects.border_rect,
                     padding: rects.padding,
                     content_rect: rects.content_rect,
+                    clip: None,
                     content: ComputedElementContent::Text(computed_cells),
                 })
             }
@@ -794,6 +883,7 @@ impl super::TermWindow {
                     border_rect: rects.border_rect,
                     padding: rects.padding,
                     content_rect: rects.content_rect,
+                    clip: None,
                     content: ComputedElementContent::Children(computed_kids),
                 })
             }
@@ -814,6 +904,7 @@ impl super::TermWindow {
                     border_rect: rects.border_rect,
                     padding: rects.padding,
                     content_rect: rects.content_rect,
+                    clip: None,
                     content: ComputedElementContent::Poly {
                         poly,
                         line_width: *line_width,
@@ -829,6 +920,35 @@ impl super::TermWindow {
         gl_state: &RenderState,
         inherited_colors: Option<&ElementColors>,
     ) -> anyhow::Result<()> {
+        self.render_element_clipped(element, gl_state, inherited_colors, None)
+    }
+
+    /// Render an element, restricted to `clip` in window coordinates.
+    ///
+    /// The quad allocators are batched, so there is no draw call to hang a
+    /// scissor rectangle on and the clip has to be applied to the geometry:
+    /// filled rectangles are trimmed, glyphs are trimmed in both position and
+    /// texture coordinates, and a rounded corner that straddles the edge is
+    /// dropped. Dropping a corner is invisible in practice, because a corner is
+    /// drawn by *not* filling that part of the box rather than by painting over
+    /// it.
+    fn render_element_clipped<'a>(
+        &self,
+        element: &ComputedElement,
+        gl_state: &RenderState,
+        inherited_colors: Option<&ElementColors>,
+        clip: Option<RectF>,
+    ) -> anyhow::Result<()> {
+        let clip = intersect_clip(clip, element.clip);
+        if let Some(clip) = clip {
+            if clip.width() <= 0. || clip.height() <= 0. {
+                return Ok(());
+            }
+            if clip.intersection(&element.bounds).is_none() {
+                return Ok(());
+            }
+        }
+
         let layer = gl_state.layer_for_zindex(element.zindex)?;
         let mut layers = layer.quad_allocator();
 
@@ -855,7 +975,7 @@ impl super::TermWindow {
             None => &element.colors,
         };
 
-        self.render_element_background(element, colors, &mut layers, inherited_colors)?;
+        self.render_element_background(element, colors, &mut layers, inherited_colors, clip)?;
         let left = self.dimensions.pixel_width as f32 / -2.0;
         let top = self.dimensions.pixel_height as f32 / -2.0;
         match &element.content {
@@ -869,27 +989,32 @@ impl super::TermWindow {
                         ElementCell::Sprite(sprite) => {
                             let width = sprite.coords.width();
                             let height = sprite.coords.height();
-                            let pos_y = top + element.content_rect.min_y();
+                            let pos_y = element.content_rect.min_y();
 
                             if pos_x + width as f32 > element.content_rect.max_x() {
                                 break;
                             }
 
-                            let mut quad = layers.allocate(2)?;
-                            quad.set_position(
-                                pos_x + left,
-                                pos_y,
-                                pos_x + left + width as f32,
-                                pos_y + height as f32,
-                            );
-                            self.resolve_text(colors, inherited_colors).apply(&mut quad);
-                            quad.set_texture(sprite.texture_coords());
-                            quad.set_hsv(None);
+                            let dest = euclid::rect(pos_x, pos_y, width as f32, height as f32);
+                            if let Some((dest, tex)) =
+                                clip_textured_quad(dest, sprite.texture_coords(), clip)
+                            {
+                                let mut quad = layers.allocate(2)?;
+                                quad.set_position(
+                                    dest.min_x() + left,
+                                    dest.min_y() + top,
+                                    dest.max_x() + left,
+                                    dest.max_y() + top,
+                                );
+                                self.resolve_text(colors, inherited_colors).apply(&mut quad);
+                                quad.set_texture(tex);
+                                quad.set_hsv(None);
+                            }
                             pos_x += width as f32;
                         }
                         ElementCell::Glyph(glyph) => {
                             if let Some(texture) = glyph.texture.as_ref() {
-                                let pos_y = element.content_rect.min_y() as f32 + top
+                                let pos_y = element.content_rect.min_y() as f32
                                     - (glyph.y_offset + glyph.bearing_y).get() as f32
                                     + element.baseline;
 
@@ -902,17 +1027,22 @@ impl super::TermWindow {
                                 let width = texture.coords.size.width as f32 * glyph.scale as f32;
                                 let height = texture.coords.size.height as f32 * glyph.scale as f32;
 
-                                let mut quad = layers.allocate(1)?;
-                                quad.set_position(
-                                    pos_x + left,
-                                    pos_y,
-                                    pos_x + left + width,
-                                    pos_y + height,
-                                );
-                                self.resolve_text(colors, inherited_colors).apply(&mut quad);
-                                quad.set_texture(texture.texture_coords());
-                                quad.set_has_color(glyph.has_color);
-                                quad.set_hsv(None);
+                                let dest = euclid::rect(pos_x, pos_y, width, height);
+                                if let Some((dest, tex)) =
+                                    clip_textured_quad(dest, texture.texture_coords(), clip)
+                                {
+                                    let mut quad = layers.allocate(1)?;
+                                    quad.set_position(
+                                        dest.min_x() + left,
+                                        dest.min_y() + top,
+                                        dest.max_x() + left,
+                                        dest.max_y() + top,
+                                    );
+                                    self.resolve_text(colors, inherited_colors).apply(&mut quad);
+                                    quad.set_texture(tex);
+                                    quad.set_has_color(glyph.has_color);
+                                    quad.set_hsv(None);
+                                }
                             }
                             pos_x += glyph.x_advance.get() as f32;
                         }
@@ -923,21 +1053,30 @@ impl super::TermWindow {
                 drop(layers);
 
                 for kid in kids {
-                    self.render_element(kid, gl_state, Some(colors))?;
+                    self.render_element_clipped(kid, gl_state, Some(colors), clip)?;
                 }
             }
             ComputedElementContent::Poly { poly, line_width } => {
                 if element.content_rect.width() >= poly.width {
-                    let mut quad = self.poly_quad(
-                        &mut layers,
-                        1,
+                    // A poly is a single sprite whose shape carries the meaning,
+                    // so trimming it would draw the wrong shape. Include it only
+                    // when it fits wholly inside the clip.
+                    let rect = euclid::Rect::new(
                         element.content_rect.origin,
-                        poly.poly,
-                        *line_width,
                         euclid::size2(poly.width, poly.height),
-                        LinearRgba::TRANSPARENT,
-                    )?;
-                    self.resolve_text(colors, inherited_colors).apply(&mut quad);
+                    );
+                    if clip.map(|clip| clip.contains_rect(&rect)).unwrap_or(true) {
+                        let mut quad = self.poly_quad(
+                            &mut layers,
+                            1,
+                            element.content_rect.origin,
+                            poly.poly,
+                            *line_width,
+                            euclid::size2(poly.width, poly.height),
+                            LinearRgba::TRANSPARENT,
+                        )?;
+                        self.resolve_text(colors, inherited_colors).apply(&mut quad);
+                    }
                 }
             }
         }
@@ -1007,12 +1146,70 @@ impl super::TermWindow {
         }
     }
 
+    /// `filled_rectangle`, trimmed to `clip`.
+    ///
+    /// A filled rectangle carries no texture detail -- it samples a solid
+    /// sprite -- so trimming its geometry is exact rather than an
+    /// approximation.
+    fn filled_rectangle_clipped<'a>(
+        &self,
+        layers: &'a mut TripleLayerQuadAllocator,
+        layer_num: usize,
+        rect: RectF,
+        color: LinearRgba,
+        clip: Option<RectF>,
+    ) -> anyhow::Result<Option<QuadImpl<'a>>> {
+        let rect = match clip {
+            Some(clip) => match clip.intersection(&rect) {
+                Some(rect) => rect,
+                None => return Ok(None),
+            },
+            None => rect,
+        };
+        if rect.width() <= 0. || rect.height() <= 0. {
+            return Ok(None);
+        }
+        Ok(Some(self.filled_rectangle(layers, layer_num, rect, color)?))
+    }
+
+    /// `poly_quad`, included only when it fits wholly inside `clip`.
+    ///
+    /// See `render_element_clipped` for why dropping a straddling corner is
+    /// invisible.
+    fn poly_quad_clipped<'a>(
+        &self,
+        layers: &'a mut TripleLayerQuadAllocator,
+        layer_num: usize,
+        point: PointF,
+        polys: &'static [Poly],
+        underline_height: isize,
+        cell_size: SizeF,
+        color: LinearRgba,
+        clip: Option<RectF>,
+    ) -> anyhow::Result<Option<QuadImpl<'a>>> {
+        if let Some(clip) = clip {
+            if !clip.contains_rect(&euclid::Rect::new(point, cell_size)) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(self.poly_quad(
+            layers,
+            layer_num,
+            point,
+            polys,
+            underline_height,
+            cell_size,
+            color,
+        )?))
+    }
+
     fn render_element_background<'a>(
         &self,
         element: &ComputedElement,
         colors: &ElementColors,
         layers: &mut TripleLayerQuadAllocator,
         inherited_colors: Option<&ElementColors>,
+        clip: Option<RectF>,
     ) -> anyhow::Result<()> {
         let mut top_left_width = 0.;
         let mut top_left_height = 0.;
@@ -1036,7 +1233,7 @@ impl super::TermWindow {
             bottom_right_height = c.bottom_right.height;
 
             if top_left_width > 0. && top_left_height > 0. {
-                self.poly_quad(
+                if let Some(mut quad) = self.poly_quad_clipped(
                     layers,
                     0,
                     element.border_rect.origin,
@@ -1044,11 +1241,13 @@ impl super::TermWindow {
                     element.border.top as isize,
                     euclid::size2(top_left_width, top_left_height),
                     colors.border.top,
-                )?
-                .set_grayscale();
+                    clip,
+                )? {
+                    quad.set_grayscale();
+                }
             }
             if top_right_width > 0. && top_right_height > 0. {
-                self.poly_quad(
+                if let Some(mut quad) = self.poly_quad_clipped(
                     layers,
                     0,
                     euclid::point2(
@@ -1059,11 +1258,13 @@ impl super::TermWindow {
                     element.border.top as isize,
                     euclid::size2(top_right_width, top_right_height),
                     colors.border.top,
-                )?
-                .set_grayscale();
+                    clip,
+                )? {
+                    quad.set_grayscale();
+                }
             }
             if bottom_left_width > 0. && bottom_left_height > 0. {
-                self.poly_quad(
+                if let Some(mut quad) = self.poly_quad_clipped(
                     layers,
                     0,
                     euclid::point2(
@@ -1074,11 +1275,13 @@ impl super::TermWindow {
                     element.border.bottom as isize,
                     euclid::size2(bottom_left_width, bottom_left_height),
                     colors.border.bottom,
-                )?
-                .set_grayscale();
+                    clip,
+                )? {
+                    quad.set_grayscale();
+                }
             }
             if bottom_right_width > 0. && bottom_right_height > 0. {
-                self.poly_quad(
+                if let Some(mut quad) = self.poly_quad_clipped(
                     layers,
                     0,
                     euclid::point2(
@@ -1089,8 +1292,10 @@ impl super::TermWindow {
                     element.border.bottom as isize,
                     euclid::size2(bottom_right_width, bottom_right_height),
                     colors.border.bottom,
-                )?
-                .set_grayscale();
+                    clip,
+                )? {
+                    quad.set_grayscale();
+                }
             }
 
             // Filling the background is more complex because we can't
@@ -1106,7 +1311,7 @@ impl super::TermWindow {
             // to do the rest
 
             // The `T` piece
-            let mut quad = self.filled_rectangle(
+            if let Some(mut quad) = self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1116,11 +1321,13 @@ impl super::TermWindow {
                     top_left_height.max(top_right_height),
                 ),
                 LinearRgba::TRANSPARENT,
-            )?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
 
             // The `B` piece
-            let mut quad = self.filled_rectangle(
+            if let Some(mut quad) = self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1130,11 +1337,13 @@ impl super::TermWindow {
                     bottom_left_height.max(bottom_right_height),
                 ),
                 LinearRgba::TRANSPARENT,
-            )?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
 
             // The `L` piece
-            let mut quad = self.filled_rectangle(
+            if let Some(mut quad) = self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1144,11 +1353,13 @@ impl super::TermWindow {
                     element.border_rect.height() - (top_left_height + bottom_left_height),
                 ),
                 LinearRgba::TRANSPARENT,
-            )?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
 
             // The `R` piece
-            let mut quad = self.filled_rectangle(
+            if let Some(mut quad) = self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1158,11 +1369,13 @@ impl super::TermWindow {
                     element.border_rect.height() - (top_right_height + bottom_right_height),
                 ),
                 LinearRgba::TRANSPARENT,
-            )?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
 
             // The `C` piece
-            let mut quad = self.filled_rectangle(
+            if let Some(mut quad) = self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1174,12 +1387,20 @@ impl super::TermWindow {
                             + bottom_right_height.min(bottom_left_height)),
                 ),
                 LinearRgba::TRANSPARENT,
-            )?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
         } else if colors.bg != InheritableColor::Color(LinearRgba::TRANSPARENT) {
-            let mut quad =
-                self.filled_rectangle(layers, 0, element.padding, LinearRgba::TRANSPARENT)?;
-            self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            if let Some(mut quad) = self.filled_rectangle_clipped(
+                layers,
+                0,
+                element.padding,
+                LinearRgba::TRANSPARENT,
+                clip,
+            )? {
+                self.resolve_bg(colors, inherited_colors).apply(&mut quad);
+            }
         }
 
         if element.border_rect == element.padding {
@@ -1188,7 +1409,7 @@ impl super::TermWindow {
         }
 
         if element.border.top > 0. && colors.border.top != LinearRgba::TRANSPARENT {
-            self.filled_rectangle(
+            self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1198,10 +1419,11 @@ impl super::TermWindow {
                     element.border.top,
                 ),
                 colors.border.top,
+                clip,
             )?;
         }
         if element.border.bottom > 0. && colors.border.bottom != LinearRgba::TRANSPARENT {
-            self.filled_rectangle(
+            self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1211,10 +1433,11 @@ impl super::TermWindow {
                     element.border.bottom,
                 ),
                 colors.border.bottom,
+                clip,
             )?;
         }
         if element.border.left > 0. && colors.border.left != LinearRgba::TRANSPARENT {
-            self.filled_rectangle(
+            self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1224,10 +1447,11 @@ impl super::TermWindow {
                     element.border_rect.height() - (top_left_height + bottom_left_height) as f32,
                 ),
                 colors.border.left,
+                clip,
             )?;
         }
         if element.border.right > 0. && colors.border.right != LinearRgba::TRANSPARENT {
-            self.filled_rectangle(
+            self.filled_rectangle_clipped(
                 layers,
                 0,
                 euclid::rect(
@@ -1237,9 +1461,130 @@ impl super::TermWindow {
                     element.border_rect.height() - (top_right_height + bottom_right_height) as f32,
                 ),
                 colors.border.right,
+                clip,
             )?;
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn ui_item(bounds: RectF, clip: Option<RectF>) -> Vec<UIItem> {
+        let element = ComputedElement {
+            item_type: Some(UIItemType::AboveScrollThumb),
+            zindex: 0,
+            bounds,
+            border_rect: bounds,
+            border: PixelDimension::default(),
+            border_corners: None,
+            colors: ElementColors::default(),
+            hover_colors: None,
+            padding: bounds,
+            content_rect: bounds,
+            baseline: 0.,
+            clip,
+            content: ComputedElementContent::Children(vec![]),
+        };
+        element.ui_items()
+    }
+
+    #[test]
+    fn a_clip_trims_the_hit_rectangle() {
+        // A key that has panned half under the pinned/scrolling boundary at
+        // x=200 must only answer taps in the half that is still visible.
+        let items = ui_item(
+            euclid::rect(150., 0., 100., 50.),
+            Some(euclid::rect(200., 0., 300., 50.)),
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].x, 200);
+        assert_eq!(items[0].width, 50);
+    }
+
+    #[test]
+    fn a_fully_clipped_hit_rectangle_is_not_published() {
+        // Not published as an empty rectangle either: hit_test uses inclusive
+        // bounds, so a zero-sized rectangle still matches its own corner and
+        // would steal the tap it was clipped away to avoid.
+        let items = ui_item(
+            euclid::rect(0., 0., 100., 50.),
+            Some(euclid::rect(200., 0., 300., 50.)),
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn no_clip_leaves_the_hit_rectangle_alone() {
+        let items = ui_item(euclid::rect(150., 10., 100., 50.), None);
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].x, items[0].y), (150, 10));
+        assert_eq!((items[0].width, items[0].height), (100, 50));
+    }
+
+    #[test]
+    fn clips_nest() {
+        assert_eq!(
+            intersect_clip(
+                Some(euclid::rect(0., 0., 100., 100.)),
+                Some(euclid::rect(50., 50., 100., 100.))
+            ),
+            Some(euclid::rect(50., 50., 50., 50.))
+        );
+        // Disjoint clips collapse to nothing rather than to None, which would
+        // read as "unclipped".
+        let empty = intersect_clip(
+            Some(euclid::rect(0., 0., 10., 10.)),
+            Some(euclid::rect(50., 50., 10., 10.)),
+        )
+        .unwrap();
+        assert!(empty.width() == 0. || empty.height() == 0.);
+
+        assert_eq!(
+            intersect_clip(None, Some(euclid::rect(1., 2., 3., 4.))),
+            Some(euclid::rect(1., 2., 3., 4.))
+        );
+        assert_eq!(intersect_clip(None, None), None);
+    }
+
+    #[test]
+    fn a_clipped_quad_trims_position_and_texture_together() {
+        let dest = euclid::rect(100., 0., 20., 10.);
+        let tex = euclid::rect(0.5, 0.25, 0.1, 0.2);
+
+        // The left half is cut away.
+        let (dest, tex) =
+            clip_textured_quad(dest, tex, Some(euclid::rect(110., 0., 100., 10.))).unwrap();
+        assert_eq!(dest, euclid::rect(110., 0., 10., 10.));
+        // Half the sprite's width, taken from its midpoint, and its full height.
+        assert!((tex.min_x() - 0.55).abs() < 1e-6);
+        assert!((tex.width() - 0.05).abs() < 1e-6);
+        assert!((tex.min_y() - 0.25).abs() < 1e-6);
+        assert!((tex.height() - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_unclipped_quad_is_untouched() {
+        let dest = euclid::rect(100., 0., 20., 10.);
+        let tex = euclid::rect(0.5, 0.25, 0.1, 0.2);
+        assert_eq!(clip_textured_quad(dest, tex, None), Some((dest, tex)));
+        // And so is one that fits entirely inside the clip.
+        assert_eq!(
+            clip_textured_quad(dest, tex, Some(euclid::rect(0., 0., 1000., 1000.))),
+            Some((dest, tex))
+        );
+    }
+
+    #[test]
+    fn a_quad_outside_the_clip_is_dropped() {
+        assert!(clip_textured_quad(
+            euclid::rect(0., 0., 20., 10.),
+            euclid::rect(0.5, 0.25, 0.1, 0.2),
+            Some(euclid::rect(200., 0., 100., 10.))
+        )
+        .is_none());
     }
 }

@@ -683,6 +683,7 @@ impl crate::TermWindow {
             padding: background_rect,
             content_rect,
             baseline: 1.0,
+            clip: None,
             content: ComputedElementContent::Children(vec![]),
         })
     }

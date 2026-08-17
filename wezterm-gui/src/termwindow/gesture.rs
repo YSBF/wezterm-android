@@ -57,9 +57,9 @@ impl TermWindow {
         match region {
             GestureRegionId::KeyRow => {
                 // Dragging the row left brings the trailing keys into view, so
-                // the scroll offset moves opposite to the finger.
+                // the scroll offset moves opposite to the finger. The row is
+                // slid in place rather than rebuilt; see `scroll_key_row`.
                 if self.scroll_key_row(-dx) {
-                    self.key_row.take();
                     window.invalidate();
                 }
             }
