@@ -684,15 +684,57 @@ would only surface on a device.
 
 None of that exercises a finger, a soft keyboard, an sshd or a rotation.
 
-## Phase 6: what is still owed
+## Phase 6: what the device found
 
-Not done.  `adb devices` is empty, and every item in phase 6 needs hardware.
-Nothing below is a known defect; they are the things the off-device checks above
-cannot answer, listed so that the first session with a device is not spent
-working out what to look at.
+Partly done.  Run on a Xiaomi 13 (`fuxi`), Android 16 / SDK 36, 1080x2400 at
+density 440 -- which is 392dp wide in portrait, below the 600dp pinning needs, so
+that device can only reach pinned mode in landscape.  The reported surface was
+1080x2235, the same figure `viewport.rs` was written against.
 
-The phase 6 list stands as written.  These are the specific things this
-implementation would like watched, because they are where it guessed:
+Four defects that every off-device check had passed were only visible once drawn:
+
+* **Key labels sat in the top-left corner of their keys.**  `min_width` and
+  `min_height` widen a box without moving the text inside it, so a label in a box
+  sized for a thumb ends up in the corner of it.  `Element::center_content` now
+  distributes the slack as padding, which moves the glyphs rather than growing
+  the box around them.
+* **`VerticalAlign::Middle` does not centre an element's own content.**  It
+  translates the element within its *parent*.  Four places had used it meaning
+  "centre my label in my row" and got neither: the label stayed at the top of the
+  row, and the row was pushed to the middle of whatever held it.  The sidebar's
+  "Hosts" title was drawn 945px down the drawer, below the list it titles, and
+  every list row was shifted down by a row.
+* **The footer overhung the drawer** by exactly one row: its spacer subtracted
+  the two action rows but not the title row.  Both places now derive from
+  `sidebar_header_height`/`sidebar_footer_height` so they cannot disagree.
+* **The sidebar never loaded the stored hosts.**  Opening it called `reload()`,
+  which only *forgets* the cached repository; nothing then re-read it, and the
+  paint path reaches for `profiles()`, which cannot load.  A populated
+  `hosts.toml` showed "No saved hosts yet." on every open, and a file that could
+  not be parsed reported nothing at all.  The open path now asks for the
+  repository, which is what turns "forget" into "re-read".
+
+Verified working on the device: the APK installs and runs; a failed connection
+leaves the app alive with the error in a pane, rather than exiting (tested by
+accident, against a stale `default_domain` pointing at a refused port); the menu
+button; the key row with its five pinned keys at 48dp and the scrolling group
+clipped at the right edge; the sidebar as an 80%-width overlay with its scrim;
+the native "Add host" dialog across the JNI boundary, with its fields, its port
+default and its buttons; and the host list showing both a stored profile and a
+`wezterm.lua` domain with the edit and delete icons in place.
+
+Still owed, because the device disconnected from USB mid-test, at the tap that
+would have started the connection:
+
+* **The connect path itself** -- `to_ssh_domain`, `ensure_domain`, and the
+  prompts.  A matching `wezterm-mux-server` and `wezterm` (both
+  `20260805-042806-6d97010c`, `CODEC_VERSION` 45) are installed on the test host
+  for the multiplexed variant; the sidebar's own profiles use
+  `SshMultiplexing::None` and need nothing on the server.
+* **Host key verification and credential prompts** against a real IME.  The
+  editor dialog fits above the soft keyboard; the multi-line key field has not
+  been seen.
+* Everything below, which the session never reached:
 
 * **The pinned/scrolling boundary.**  It is the measured right edge of the pinned
   cluster.  Confirm that the first scrolling key sits flush against it, that a

@@ -528,6 +528,9 @@ impl TermWindow {
             .item_type(UIItemType::KeyRow(key))
             .min_width(Some(Dimension::Pixels(width)))
             .min_height(Some(Dimension::Pixels(dp(target, dpi).min(height))))
+            // The label belongs in the middle of the target the finger is aimed
+            // at, not in its top-left corner.
+            .center_content(true)
             .vertical_align(VerticalAlign::Middle)
             .float(Float::None)
             .margin(BoxDimension {

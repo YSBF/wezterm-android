@@ -275,7 +275,18 @@ impl TermWindow {
             // Re-read on every open. The file is small, and a stale list after
             // an edit made in another Activity of the same process is worse
             // than the read.
+            //
+            // `reload` only drops the cached copy; the read itself happens on
+            // the next request for the repository. Making that request here is
+            // what turns "forget" into "re-read": the painting path reaches for
+            // `profiles()`, which cannot load anything, so without this an open
+            // sidebar shows an empty list whatever the file says -- and a file
+            // it could not parse reports nothing either. Clear any previous
+            // notice first, so a failure that has since been fixed does not
+            // linger.
             self.sidebar.reload();
+            self.sidebar.notice = None;
+            self.sidebar.repository_mut();
             self.sidebar.configured = crate::hosts::configured_ssh_domains(&self.config);
         } else {
             self.sidebar.notice = None;
@@ -377,8 +388,8 @@ impl TermWindow {
             drawer.height(),
         )?;
 
-        let header_height = dp(ROW_HEIGHT_DP, dpi) + self.sidebar_notice_height(dpi);
-        let footer_height = 2. * dp(ROW_HEIGHT_DP, dpi);
+        let header_height = self.sidebar_header_height(dpi);
+        let footer_height = self.sidebar_footer_height(dpi);
         let viewport = euclid::rect(
             drawer.min_x(),
             drawer.min_y() + header_height,
@@ -485,6 +496,16 @@ impl TermWindow {
         }
     }
 
+    /// The title row plus any notice, above the scrolling list.
+    fn sidebar_header_height(&self, dpi: f64) -> f32 {
+        dp(ROW_HEIGHT_DP, dpi) + self.sidebar_notice_height(dpi)
+    }
+
+    /// The two action rows below the scrolling list.
+    fn sidebar_footer_height(&self, dpi: f64) -> f32 {
+        2. * dp(ROW_HEIGHT_DP, dpi)
+    }
+
     /// The drawer's background, its title, any notice, and the footer actions.
     fn build_sidebar_frame(
         &self,
@@ -492,7 +513,6 @@ impl TermWindow {
         dpi: f64,
         drawer: &RectF,
     ) -> Element {
-        let row = dp(ROW_HEIGHT_DP, dpi);
         let mut children = vec![self.sidebar_label(font, dpi, "Hosts", drawer.width(), true)];
 
         if let Some(notice) = &self.sidebar.notice {
@@ -502,15 +522,13 @@ impl TermWindow {
         // The footer is pushed to the bottom by a spacer of the height the list
         // viewport occupies. Giving the footer `VerticalAlign::Bottom` would
         // align it within its own row rather than within the drawer.
-        let spacer_height = (drawer.height()
-            - (2.
-                + if self.sidebar.notice.is_some() {
-                    1.
-                } else {
-                    0.
-                })
-                * row)
-            .max(0.);
+        //
+        // Derived from the same header and footer heights that place the list's
+        // viewport, so the spacer cannot disagree with it about where the list
+        // ends and push the footer off the bottom of the drawer.
+        let spacer_height =
+            (drawer.height() - self.sidebar_header_height(dpi) - self.sidebar_footer_height(dpi))
+                .max(0.);
         children.push(
             Element::new(font, ElementContent::Children(vec![]))
                 .display(DisplayType::Block)
@@ -601,7 +619,7 @@ impl TermWindow {
         let children = vec![
             self.sidebar_icon(font, dpi, "x", SidebarItem::Delete(profile.id.clone())),
             self.sidebar_icon(font, dpi, "...", SidebarItem::Edit(profile.id.clone())),
-            self.sidebar_row_label(font, dpi, &label, width - 2. * dp(ICON_DP, dpi)),
+            self.sidebar_row_label(font, &label, width - 2. * dp(ICON_DP, dpi)),
         ];
 
         self.sidebar_row(
@@ -635,7 +653,7 @@ impl TermWindow {
             label
         };
 
-        let children = vec![self.sidebar_row_label(font, dpi, &label, width)];
+        let children = vec![self.sidebar_row_label(font, &label, width)];
         self.sidebar_row(
             font,
             dpi,
@@ -658,7 +676,9 @@ impl TermWindow {
             .item_type(UIItemType::Sidebar(item))
             .min_width(Some(Dimension::Pixels(width)))
             .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
-            .vertical_align(VerticalAlign::Middle)
+            // No vertical_align: a row is stacked against its neighbours in the
+            // list, and asking to be centred would move it down by half the
+            // list's height, taking every following row with it.
             .colors(ElementColors {
                 border: Default::default(),
                 bg: InheritableColor::Color(self.sidebar_row_color()),
@@ -687,15 +707,17 @@ impl TermWindow {
     fn sidebar_row_label(
         &self,
         font: &std::rc::Rc<wezterm_font::LoadedFont>,
-        dpi: f64,
         text: &str,
         width: f32,
     ) -> Element {
         Element::new(font, ElementContent::Text(text.to_string()))
+            // Left to its natural height so that `Middle` has room to centre it
+            // in the row above. Giving it the row's height instead would make it
+            // exactly as tall as its parent, so centring became a no-op and the
+            // text sat against the top edge.
             .vertical_align(VerticalAlign::Middle)
             .float(Float::None)
             .max_width(Some(Dimension::Pixels(width.max(0.))))
-            .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
     }
 
     /// A small square button at the right of a row.
@@ -709,7 +731,10 @@ impl TermWindow {
         Element::new(font, ElementContent::Text(text.to_string()))
             .item_type(UIItemType::Sidebar(item))
             .float(Float::Right)
+            // Middle centres this button within the taller row; center_content
+            // centres the glyph within the button.
             .vertical_align(VerticalAlign::Middle)
+            .center_content(true)
             .min_width(Some(Dimension::Pixels(dp(ICON_DP, dpi))))
             .min_height(Some(Dimension::Pixels(dp(ICON_DP, dpi))))
             .colors(ElementColors {
@@ -745,7 +770,7 @@ impl TermWindow {
             .item_type(UIItemType::Sidebar(SidebarItem::Inert))
             .min_width(Some(Dimension::Pixels(width)))
             .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
-            .vertical_align(VerticalAlign::Middle)
+            .center_content_vertically(true)
             .padding(BoxDimension {
                 left: Dimension::Pixels(dp(ROW_PADDING_DP, dpi)),
                 right: Dimension::Pixels(dp(ROW_PADDING_DP, dpi)),
@@ -771,7 +796,7 @@ impl TermWindow {
             .item_type(UIItemType::Sidebar(SidebarItem::Inert))
             .min_width(Some(Dimension::Pixels(width)))
             .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
-            .vertical_align(VerticalAlign::Middle)
+            .center_content_vertically(true)
             .padding(BoxDimension {
                 left: Dimension::Pixels(dp(ROW_PADDING_DP, dpi)),
                 right: Dimension::Pixels(dp(ROW_PADDING_DP, dpi)),
@@ -799,7 +824,7 @@ impl TermWindow {
                 Element::new(font, ElementContent::Text(label.to_string()))
                     .item_type(UIItemType::Sidebar(item.clone()))
                     .float(Float::None)
-                    .vertical_align(VerticalAlign::Middle)
+                    .center_content(true)
                     .min_width(Some(Dimension::Pixels(share)))
                     .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
                     .colors(ElementColors {

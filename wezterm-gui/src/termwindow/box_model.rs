@@ -240,6 +240,22 @@ pub struct Element {
     pub max_width: Option<Dimension>,
     pub min_width: Option<Dimension>,
     pub min_height: Option<Dimension>,
+    /// Centre text content in whatever space `min_width` adds.
+    ///
+    /// Off by default, because every other caller lays text out at the content
+    /// origin and expects to keep doing so. `min_width` on its own only widens
+    /// the box: the glyphs still start at its left edge, so a label in a box
+    /// sized for a touch target ends up in its top-left corner rather than the
+    /// middle of the key the user is aiming at.
+    pub center_x: bool,
+    /// Centre text content in whatever space `min_height` adds.
+    ///
+    /// Note that this is *not* `VerticalAlign::Middle`, which moves this element
+    /// within its parent rather than moving the text within this element. A row
+    /// that gives itself a height and then asks for `Middle` to centre its own
+    /// label gets neither: the label stays at the top of the row, and the row
+    /// itself is pushed to the middle of whatever contains it.
+    pub center_y: bool,
 }
 
 impl Element {
@@ -263,6 +279,8 @@ impl Element {
             max_width: None,
             min_width: None,
             min_height: None,
+            center_x: false,
+            center_y: false,
         }
     }
 
@@ -386,6 +404,19 @@ impl Element {
 
     pub fn min_height(mut self, height: Option<Dimension>) -> Self {
         self.min_height = height;
+        self
+    }
+
+    /// Centre the text on both axes within `min_width`/`min_height`.
+    pub fn center_content(mut self, center: bool) -> Self {
+        self.center_x = center;
+        self.center_y = center;
+        self
+    }
+
+    /// Centre the text vertically within `min_height`, leaving it left-aligned.
+    pub fn center_content_vertically(mut self, center: bool) -> Self {
+        self.center_y = center;
         self
     }
 }
@@ -586,9 +617,48 @@ struct Rects {
     translate: euclid::Vector2D<f32, PixelUnit>,
 }
 
+/// Space added outside the content box, beyond the element's own padding.
+///
+/// This is how centring is expressed: the content box keeps its natural size
+/// and the slack is pushed outwards, so the glyphs move rather than the box
+/// growing around a label pinned to its corner.
+#[derive(Debug, Default, Clone, Copy)]
+struct ExtraPadding {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// Split the slack between a natural size and a minimum into leading and
+/// trailing halves.
+///
+/// The odd pixel goes to the trailing side. Which side it lands on matters
+/// less than that it lands somewhere: dropping it would leave the content box
+/// a pixel narrower than the minimum asked for, so a row of keys would drift
+/// left of the hit rectangles that were laid out from the same minimum.
+fn center_slack(natural: f32, minimum: f32) -> (f32, f32) {
+    let slack = (minimum - natural).max(0.);
+    let leading = (slack / 2.).floor();
+    (leading, slack - leading)
+}
+
 impl Element {
     fn compute_rects(&self, context: &LayoutContext, content_rect: RectF) -> Rects {
-        let padding = self.padding.to_pixels(context);
+        self.compute_rects_with_extra(context, content_rect, ExtraPadding::default())
+    }
+
+    fn compute_rects_with_extra(
+        &self,
+        context: &LayoutContext,
+        content_rect: RectF,
+        extra: ExtraPadding,
+    ) -> Rects {
+        let mut padding = self.padding.to_pixels(context);
+        padding.left += extra.left;
+        padding.right += extra.right;
+        padding.top += extra.top;
+        padding.bottom += extra.bottom;
         let margin = self.margin.to_pixels(context);
         let border = self.border.to_pixels(context);
 
@@ -748,14 +818,33 @@ impl super::TermWindow {
                     }
                 }
 
-                let content_rect = euclid::rect(
-                    0.,
-                    0.,
-                    pixel_width.max(min_width),
-                    context.height.pixel_cell.max(min_height),
-                );
+                // Without centring the box simply grows to the minimum and the
+                // text stays at its origin. With it, the box stays the size of
+                // the text and the slack becomes padding, which is what moves
+                // the glyphs; the odd pixel goes to the right/bottom rather
+                // than being lost to rounding.
+                let (content_width, left, right) = if element.center_x {
+                    let (left, right) = center_slack(pixel_width, min_width);
+                    (pixel_width, left, right)
+                } else {
+                    (pixel_width.max(min_width), 0., 0.)
+                };
+                let (content_height, top, bottom) = if element.center_y {
+                    let (top, bottom) = center_slack(context.height.pixel_cell, min_height);
+                    (context.height.pixel_cell, top, bottom)
+                } else {
+                    (context.height.pixel_cell.max(min_height), 0., 0.)
+                };
 
-                let rects = element.compute_rects(context, content_rect);
+                let content_rect = euclid::rect(0., 0., content_width, content_height);
+                let extra = ExtraPadding {
+                    left,
+                    right,
+                    top,
+                    bottom,
+                };
+
+                let rects = element.compute_rects_with_extra(context, content_rect, extra);
 
                 Ok(ComputedElement {
                     item_type: element.item_type.clone(),
@@ -1472,6 +1561,25 @@ impl super::TermWindow {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn centring_splits_the_slack_and_keeps_every_pixel() {
+        // An even split, and an odd one where the extra pixel must not vanish:
+        // leading + trailing has to come back to the full slack, or the box
+        // ends up narrower than the minimum it was laid out from.
+        assert_eq!(center_slack(100., 140.), (20., 20.));
+        let (leading, trailing) = center_slack(100., 141.);
+        assert_eq!((leading, trailing), (20., 21.));
+        assert_eq!(leading + trailing, 41.);
+    }
+
+    #[test]
+    fn content_wider_than_the_minimum_gets_no_slack() {
+        // Nothing to centre, and in particular nothing negative: a label longer
+        // than its key must not be pulled left by a negative leading pad.
+        assert_eq!(center_slack(200., 140.), (0., 0.));
+        assert_eq!(center_slack(140., 140.), (0., 0.));
+    }
 
     fn ui_item(bounds: RectF, clip: Option<RectF>) -> Vec<UIItem> {
         let element = ComputedElement {
