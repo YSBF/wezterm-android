@@ -723,17 +723,50 @@ the native "Add host" dialog across the JNI boundary, with its fields, its port
 default and its buttons; and the host list showing both a stored profile and a
 `wezterm.lua` domain with the edit and delete icons in place.
 
+### Stored profiles cannot keep state, and the sidebar cannot say so
+
+Verified against ubuntu-frp with a version-matched `wezterm-mux-server`
+(`20260805-042806-6d97010c`, `CODEC_VERSION` 45, so client and server agree).
+
+`HostProfile::to_ssh_domain` sets `multiplexing: SshMultiplexing::None`, which is
+a bare ssh shell: every connect is a new shell and nothing survives closing the
+tab.  That is the right default -- it needs nothing installed on the server --
+but it is the *only* thing a stored profile can be, and the sidebar gives no way
+to ask for anything else.  A user who wants what `wezterm connect` gives them on
+the desktop has to leave the sidebar and write `wezterm.lua` by hand.
+
+The two multiplexed behaviours are not the same, and the difference is not
+visible anywhere in the UI:
+
+* **Tapping a `[mux]` domain in the sidebar spawns a new pane.**  Confirmed: a
+  server holding one pane ended up holding two, and the phone was showing the
+  new empty one while the original kept its contents.  State lives on the server,
+  so it is not lost -- but it is not what you were looking at either.
+* **`default_domain` naming a mux domain adopts the panes already there.**  The
+  Android entry point builds the same `StartCommand` as `wezterm connect`, with
+  attach set.  Confirmed by killing the app and restarting it: both server panes
+  came back, the first still showing the marker echoed into it before the app
+  died, and the pane count stayed at two rather than growing.
+
+So the capability is present and works on Android; what is missing is any way for
+the sidebar to reach it.  A profile would need at least a multiplexing choice,
+and "attach to what is already running" is a different action from "connect",
+which the single tap-to-connect row cannot express.
+
 Still owed, because the device disconnected from USB mid-test, at the tap that
 would have started the connection:
 
-* **The connect path itself** -- `to_ssh_domain`, `ensure_domain`, and the
-  prompts.  A matching `wezterm-mux-server` and `wezterm` (both
-  `20260805-042806-6d97010c`, `CODEC_VERSION` 45) are installed on the test host
-  for the multiplexed variant; the sidebar's own profiles use
-  `SshMultiplexing::None` and need nothing on the server.
-* **Host key verification and credential prompts** against a real IME.  The
-  editor dialog fits above the soft keyboard; the multi-line key field has not
-  been seen.
+* **Credential prompts.**  Host key verification is done: deleting
+  `known_hosts` and reconnecting raised the native "Unknown host key" dialog with
+  the fingerprint, it blocked the connection until answered, and accepting wrote
+  the key.  Password and keyboard-interactive prompts have not been seen, because
+  the test host takes a key.
+* **A note on answering slowly.**  The prompt blocks the ssh session, and sshd's
+  `LoginGraceTime` is 120s by default.  A prompt left unanswered for longer fails
+  with `Socket error: disconnected` -- observed, and not a defect, but a prompt
+  that a user reads carefully is a prompt that can time out.
+* **The multi-line key import field** against a real IME.  The host editor itself
+  fits above the soft keyboard.
 * Everything below, which the session never reached:
 
 * **The pinned/scrolling boundary.**  It is the measured right edge of the pinned
