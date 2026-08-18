@@ -165,6 +165,15 @@ pub enum TermWindowNotif {
     HostProfilesReset,
     /// Something for the sidebar to say.
     SidebarNotice(String),
+    /// A key was pasted and is ready to store. Carries the material, so it is
+    /// never logged and is consumed by the handler that writes it.
+    KeyImported(crate::hosts::ImportedKey),
+    /// A key deletion was confirmed.
+    KeyDeleted(String),
+    /// Attaching to a multiplexed domain found nothing running, so there is a
+    /// first session to start. Arrives from the attach task rather than from the
+    /// tap, which is over long before the far end has answered.
+    SpawnTabInDomain(mux::domain::DomainId),
 }
 
 /// Convert device-independent pixels to device pixels.
@@ -1434,6 +1443,21 @@ impl TermWindow {
             TermWindowNotif::SidebarNotice(notice) => {
                 self.sidebar.set_notice(Some(notice));
                 window.invalidate();
+            }
+            TermWindowNotif::KeyImported(imported) => {
+                self.key_imported(imported);
+                window.invalidate();
+            }
+            TermWindowNotif::KeyDeleted(id) => {
+                self.key_deleted(id);
+                window.invalidate();
+            }
+            TermWindowNotif::SpawnTabInDomain(domain_id) => {
+                if let Some(domain) = Mux::get().get_domain(domain_id) {
+                    self.spawn_tab(&config::keyassignment::SpawnTabDomain::DomainName(
+                        domain.domain_name().to_string(),
+                    ));
+                }
             }
         }
 

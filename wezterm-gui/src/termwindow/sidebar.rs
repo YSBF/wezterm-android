@@ -36,7 +36,7 @@
 //! must not scroll the terminal. Both are published as regions: the drawer, and a
 //! full-surface scrim at a lower priority. See `crate::termwindow::gesture`.
 
-use crate::hosts::{ConfiguredDomain, HostProfile, HostRepository};
+use crate::hosts::{ConfiguredDomain, HostProfile, HostRepository, KeyEntry};
 use crate::termwindow::box_model::{
     BoxDimension, ComputedElement, Corners, DisplayType, Element, ElementColors, ElementContent,
     Float, InheritableColor, LayoutContext, SizedPoly, VerticalAlign,
@@ -48,6 +48,8 @@ use crate::termwindow::render::corners::{
 use crate::termwindow::{dp, TermWindow, TermWindowNotif, UIItem, UIItemType};
 use crate::utilsprites::RenderMetrics;
 use config::{Dimension, DimensionContext};
+use mux::domain::Domain;
+use mux::Mux;
 use window::color::LinearRgba;
 use window::{RectF, WindowOps};
 
@@ -86,6 +88,10 @@ pub enum SidebarItem {
     /// Connect to a domain declared in `wezterm.lua`.
     ConfiguredDomain(String),
     Add,
+    /// Import a private key into the keychain.
+    AddKey,
+    /// Forget a key, and detach it from every host that used it.
+    DeleteKey(String),
     Export,
     Reset,
     Close,
@@ -197,6 +203,10 @@ impl Sidebar {
 
     pub fn profile(&self, id: &str) -> Option<&HostProfile> {
         self.repo.as_ref().and_then(|repo| repo.get(id))
+    }
+
+    pub fn keys(&self) -> &[KeyEntry] {
+        self.repo.as_ref().map(|repo| repo.keys()).unwrap_or(&[])
     }
 
     /// The repository, loading it if this is the first time it is needed.
@@ -595,6 +605,23 @@ impl TermWindow {
             }
         }
 
+        // Keys last: they are a thing you set up once and then choose from in
+        // the host editor, not something to scroll past on the way to a host.
+        children.push(self.sidebar_label(font, dpi, "Keys", width, true));
+        if self.sidebar.keys().is_empty() {
+            children.push(self.sidebar_label(font, dpi, "No keys yet.", width, false));
+        }
+        for key in self.sidebar.keys() {
+            children.push(self.sidebar_key_row(font, dpi, width, key));
+        }
+        children.push(self.sidebar_row(
+            font,
+            dpi,
+            width,
+            vec![self.sidebar_row_label(font, "+  Add key", width)],
+            SidebarItem::AddKey,
+        ));
+
         Element::new(font, ElementContent::Children(children))
             .display(DisplayType::Block)
             .min_width(Some(Dimension::Pixels(width)))
@@ -661,6 +688,36 @@ impl TermWindow {
             children,
             SidebarItem::ConfiguredDomain(domain.name.clone()),
         )
+    }
+
+    /// One key in the keychain, with a delete button. Not tappable otherwise:
+    /// a key is chosen from the host editor, not from here.
+    fn sidebar_key_row(
+        &self,
+        font: &std::rc::Rc<wezterm_font::LoadedFont>,
+        dpi: f64,
+        width: f32,
+        key: &KeyEntry,
+    ) -> Element {
+        let used_by = self
+            .sidebar
+            .profiles()
+            .iter()
+            .filter(|profile| profile.key_id.as_deref() == Some(key.id.as_str()))
+            .count();
+        // Saying how many hosts use it is what makes the delete button safe to
+        // press deliberately: the confirmation can then name a consequence.
+        let label = match used_by {
+            0 => format!("{}   unused", key.name),
+            1 => format!("{}   1 host", key.name),
+            n => format!("{}   {n} hosts", key.name),
+        };
+
+        let children = vec![
+            self.sidebar_icon(font, dpi, "x", SidebarItem::DeleteKey(key.id.clone())),
+            self.sidebar_row_label(font, &label, width - dp(ICON_DP, dpi)),
+        ];
+        self.sidebar_row(font, dpi, width, children, SidebarItem::Inert)
     }
 
     fn sidebar_row(
@@ -1016,6 +1073,8 @@ impl TermWindow {
                 self.set_sidebar_state(SidebarState::Closed);
             }
             SidebarItem::Add => self.edit_host_profile(None),
+            SidebarItem::AddKey => self.add_key(),
+            SidebarItem::DeleteKey(id) => self.delete_key(&id),
             SidebarItem::Edit(id) => self.edit_host_profile(Some(id)),
             SidebarItem::Delete(id) => self.delete_host_profile(&id),
             SidebarItem::Pin => self.set_sidebar_state(SidebarState::Pinned),
@@ -1035,18 +1094,68 @@ impl TermWindow {
     /// and any failure inside the pane it is creating -- which is where a user
     /// looking at a connection that did not come up will be looking.
     fn connect_to_profile(&mut self, profile: &HostProfile) {
-        match crate::hosts::ensure_domain(profile) {
-            Ok(_) => {
-                self.spawn_tab(&config::keyassignment::SpawnTabDomain::DomainName(
-                    profile.domain_name(),
-                ));
-            }
+        let key_path = self
+            .sidebar
+            .repo
+            .as_ref()
+            .and_then(|repo| repo.key_path_for(profile));
+
+        let domain = match crate::hosts::ensure_domain(profile, key_path.as_deref()) {
+            Ok(domain) => domain,
             Err(err) => {
                 log::error!("could not prepare {}: {err:#}", profile.display_name);
                 self.sidebar
                     .set_notice(Some(format!("Could not connect: {err:#}")));
+                return;
             }
+        };
+
+        if profile.multiplexing {
+            self.attach_to_profile(profile, domain);
+        } else {
+            self.spawn_tab(&config::keyassignment::SpawnTabDomain::DomainName(
+                profile.domain_name(),
+            ));
         }
+    }
+
+    /// Adopt whatever is already running on the far end, and only start
+    /// something if there was nothing there.
+    ///
+    /// This is the difference the multiplexing option is *for*. Spawning
+    /// unconditionally would connect to a server holding the user's panes and
+    /// then put a brand new empty one in front of them, which looks exactly like
+    /// the state having been lost -- the panes are still there, just not the ones
+    /// being shown.
+    fn attach_to_profile(&mut self, profile: &HostProfile, domain: std::sync::Arc<dyn Domain>) {
+        let mux_window_id = self.mux_window_id;
+        let name = profile.display_name.clone();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        promise::spawn::spawn(async move {
+            if let Err(err) = domain.attach(Some(mux_window_id)).await {
+                log::error!("could not attach to {name}: {err:#}");
+                window.notify(TermWindowNotif::SidebarNotice(format!(
+                    "Could not reach the session on {name}: {err:#}. \
+                     Keeping the session running needs a matching wezterm-mux-server \
+                     installed on that host."
+                )));
+                return;
+            }
+
+            let adopted = Mux::get()
+                .iter_panes()
+                .iter()
+                .any(|pane| pane.domain_id() == domain.domain_id());
+            if !adopted {
+                // Nothing was running, so this is a first connection rather than
+                // a reattach and there is something to start.
+                window.notify(TermWindowNotif::SpawnTabInDomain(domain.domain_id()));
+            }
+        })
+        .detach();
     }
 
     /// Add a profile, or edit one.
@@ -1059,9 +1168,12 @@ impl TermWindow {
         let Some(window) = self.window.clone() else {
             return;
         };
+        // Copied rather than borrowed: the form outlives this call, and the
+        // keychain it offers is the one that existed when it was opened.
+        let keys = self.sidebar.keys().to_vec();
 
         promise::spawn::spawn(async move {
-            match crate::hosts::edit_interactively(existing.as_ref()).await {
+            match crate::hosts::edit_interactively(existing.as_ref(), &keys).await {
                 Ok(Some(profile)) => {
                     window.notify(TermWindowNotif::HostProfileEdited {
                         profile,
@@ -1079,6 +1191,115 @@ impl TermWindow {
             }
         })
         .detach();
+    }
+
+    /// Import a private key into the keychain.
+    ///
+    /// The dialog only collects; the write happens back here, where the
+    /// repository that mints the key's id is reachable.
+    fn add_key(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        promise::spawn::spawn(async move {
+            match crate::hosts::import_key_interactively().await {
+                Ok(Some(imported)) => {
+                    window.notify(TermWindowNotif::KeyImported(imported));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    log::error!("the key import failed: {err:#}");
+                    window.notify(TermWindowNotif::SidebarNotice(format!(
+                        "Could not import the key: {err:#}"
+                    )));
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Store a key that was just pasted.
+    pub fn key_imported(&mut self, imported: crate::hosts::ImportedKey) {
+        let Some(repo) = self.sidebar.repository_mut() else {
+            return;
+        };
+        // `imported` is consumed here and not logged: it carries the key.
+        let outcome = repo.add_key(&imported.name, &imported.pem);
+        drop(imported);
+        match outcome {
+            Ok(entry) => {
+                self.sidebar
+                    .set_notice(Some(format!("Added {}", entry.name)));
+            }
+            Err(err) => {
+                log::error!("could not store the key: {err:#}");
+                self.sidebar
+                    .set_notice(Some(format!("Could not store the key: {err:#}")));
+            }
+        }
+        self.sidebar.invalidate();
+    }
+
+    /// Forget a key.
+    ///
+    /// Confirmed, because it detaches the key from every host that used it and
+    /// there is no undo: the material is gone and only the user has another copy.
+    fn delete_key(&mut self, id: &str) {
+        let Some(key) = self.sidebar.keys().iter().find(|key| key.id == id).cloned() else {
+            return;
+        };
+        let used_by = self
+            .sidebar
+            .profiles()
+            .iter()
+            .filter(|profile| profile.key_id.as_deref() == Some(id.as_ref()))
+            .count();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+
+        promise::spawn::spawn(async move {
+            let mut spec = crate::dialog::DialogSpec::new("Delete key")
+                .submit_label("Delete")
+                .grave(true);
+            spec = spec.message(&match used_by {
+                0 => format!(
+                    "Delete the key \"{}\"? This app's only copy of it is removed.",
+                    key.name
+                ),
+                1 => format!(
+                    "Delete the key \"{}\"? One host uses it and will be left with \
+                     no key. This app's only copy of it is removed.",
+                    key.name
+                ),
+                n => format!(
+                    "Delete the key \"{}\"? {n} hosts use it and will be left with \
+                     no key. This app's only copy of it is removed.",
+                    key.name
+                ),
+            });
+
+            match crate::dialog::confirm(&spec).await {
+                Ok(true) => window.notify(TermWindowNotif::KeyDeleted(key.id)),
+                Ok(false) => {}
+                Err(err) => log::error!("the delete confirmation failed: {err:#}"),
+            }
+        })
+        .detach();
+    }
+
+    /// Carry out a confirmed key deletion.
+    pub fn key_deleted(&mut self, id: String) {
+        let Some(repo) = self.sidebar.repository_mut() else {
+            return;
+        };
+        if let Err(err) = repo.remove_key(&id) {
+            log::error!("could not delete the key: {err:#}");
+            self.sidebar
+                .set_notice(Some(format!("Could not delete the key: {err:#}")));
+        }
+        self.sidebar.invalidate();
     }
 
     /// Store an edited profile.
