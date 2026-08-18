@@ -36,6 +36,32 @@ pub enum FieldKind {
     /// Unmasked because a private key is pasted rather than typed and the user
     /// needs to see that the paste landed.
     SecretMultiline,
+    /// An on/off switch. The answer comes back as `"true"` or `"false"`.
+    Toggle,
+    /// One of `options`. The answer is the chosen option's `value`.
+    ///
+    /// A list rather than free text because every choice this app offers is
+    /// drawn from something it already knows about -- the stored keys -- and a
+    /// typed name would only be a way to name one that does not exist.
+    Choice,
+}
+
+/// One entry in a `Choice` field.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChoiceOption {
+    /// What comes back in the answer.
+    pub value: String,
+    /// What the user reads.
+    pub label: String,
+}
+
+impl ChoiceOption {
+    pub fn new(value: &str, label: &str) -> Self {
+        Self {
+            value: value.to_string(),
+            label: label.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +77,9 @@ pub struct DialogField {
     /// A validation message to show beside the field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The choices, for a `Choice` field. Empty for every other kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ChoiceOption>,
 }
 
 impl DialogField {
@@ -62,7 +91,25 @@ impl DialogField {
             value: value.to_string(),
             hint: None,
             error: None,
+            options: vec![],
         }
+    }
+
+    /// A toggle, whose value is a bool rather than a string.
+    pub fn toggle(key: &str, label: &str, on: bool) -> Self {
+        Self::new(
+            key,
+            label,
+            FieldKind::Toggle,
+            if on { "true" } else { "false" },
+        )
+    }
+
+    /// A single-select over `options`, starting on `value`.
+    pub fn choice(key: &str, label: &str, value: &str, options: Vec<ChoiceOption>) -> Self {
+        let mut field = Self::new(key, label, FieldKind::Choice, value);
+        field.options = options;
+        field
     }
 
     pub fn hint(mut self, hint: &str) -> Self {
@@ -162,6 +209,18 @@ impl DialogValues {
 
     pub fn parse_u16(&self, key: &str) -> Option<u16> {
         self.get(key).trim().parse().ok()
+    }
+
+    /// A `Toggle`'s answer.
+    ///
+    /// Anything that is not recognisably true reads as false, including a
+    /// missing key: a toggle whose answer did not arrive is off, which is the
+    /// safe reading for every toggle this app has.
+    pub fn parse_bool(&self, key: &str) -> bool {
+        matches!(
+            self.get(key).trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
     }
 
     #[cfg(test)]

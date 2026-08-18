@@ -8,11 +8,14 @@ import android.text.InputType
 import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.widget.SwitchCompat
 import org.json.JSONObject
 
 /**
@@ -39,6 +42,8 @@ object WezTermDialogs {
     private const val KIND_NUMBER = "number"
     private const val KIND_PASSWORD = "password"
     private const val KIND_SECRET_MULTILINE = "secret_multiline"
+    private const val KIND_TOGGLE = "toggle"
+    private const val KIND_CHOICE = "choice"
 
     /**
      * Present a dialog and report the outcome exactly once.
@@ -65,6 +70,15 @@ object WezTermDialogs {
         if (fieldsJson != null) {
             for (i in 0 until fieldsJson.length()) {
                 val field = fieldsJson.optJSONObject(i) ?: continue
+                val options = mutableListOf<Choice>()
+                field.optJSONArray("options")?.let { array ->
+                    for (j in 0 until array.length()) {
+                        val option = array.optJSONObject(j) ?: continue
+                        options.add(
+                            Choice(option.optString("value"), option.optString("label")),
+                        )
+                    }
+                }
                 fields.add(
                     Field(
                         key = field.optString("key"),
@@ -73,13 +87,26 @@ object WezTermDialogs {
                         value = field.optString("value"),
                         hint = field.optString("hint").ifEmpty { null },
                         error = field.optString("error").ifEmpty { null },
+                        options = options,
                     ),
                 )
             }
         }
 
-        val editors = mutableMapOf<String, EditText>()
-        val body = buildBody(activity, parsed.optString("message").ifEmpty { null }, fields, editors)
+        // How to read each field back, keyed the same way as the spec. Not every
+        // field is an EditText any more: a toggle is a Switch and a choice is a
+        // Spinner, and neither has text to read.
+        val readers = mutableMapOf<String, () -> String>()
+        // Only the text editors holding something secret, which are the ones
+        // that have to be wiped once the answer has been handed over.
+        val sensitive = mutableListOf<EditText>()
+        val body = buildBody(
+            activity,
+            parsed.optString("message").ifEmpty { null },
+            fields,
+            readers,
+            sensitive,
+        )
 
         // Exactly once: a dialog can be submitted, cancelled, or dismissed by
         // the system, and more than one of those can fire for a single dialog.
@@ -93,10 +120,8 @@ object WezTermDialogs {
                 respond(values)
                 // Do not leave a password or a private key sitting in a view
                 // hierarchy that the dialog may keep alive.
-                for (field in fields) {
-                    if (isSensitive(field.kind)) {
-                        editors[field.key]?.setText("")
-                    }
+                for (editor in sensitive) {
+                    editor.setText("")
                 }
             }
         }
@@ -107,7 +132,7 @@ object WezTermDialogs {
             .setView(body)
             .setPositiveButton(parsed.optString("submit_label", "OK")) { _, _ ->
                 val values = fields.associate { field ->
-                    field.key to (editors[field.key]?.text?.toString() ?: "")
+                    field.key to (readers[field.key]?.invoke() ?: "")
                 }
                 if (parsed.optBoolean("clear_clipboard_on_submit", false)) {
                     clearClipboard(activity)
@@ -142,6 +167,8 @@ object WezTermDialogs {
         return JSONObject().put("values", payload).toString()
     }
 
+    private data class Choice(val value: String, val label: String)
+
     private data class Field(
         val key: String,
         val label: String,
@@ -149,6 +176,7 @@ object WezTermDialogs {
         val value: String,
         val hint: String?,
         val error: String?,
+        val options: List<Choice>,
     )
 
     private fun isSensitive(kind: String) =
@@ -158,7 +186,8 @@ object WezTermDialogs {
         context: Context,
         message: String?,
         fields: List<Field>,
-        editors: MutableMap<String, EditText>,
+        readers: MutableMap<String, () -> String>,
+        sensitive: MutableList<EditText>,
     ): View {
         val pad = dp(context, 16)
         val column = LinearLayout(context).apply {
@@ -176,26 +205,82 @@ object WezTermDialogs {
         }
 
         for (field in fields) {
-            column.addView(
-                TextView(context).apply {
-                    text = field.label
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                },
-            )
+            // A switch carries its own label, so a separate caption above it
+            // would read as the label twice.
+            if (field.kind != KIND_TOGGLE) {
+                column.addView(
+                    TextView(context).apply {
+                        text = field.label
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    },
+                )
+            }
 
-            val editor = EditText(context).apply {
-                setText(field.value)
-                applyKind(this, field.kind)
-                field.hint?.let { hint = it }
-                // A key or a password must not be offered to autofill, and must
-                // not be learned by the IME for later suggestion.
-                if (isSensitive(field.kind)) {
-                    importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-                    setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+            when (field.kind) {
+                KIND_TOGGLE -> {
+                    val toggle = SwitchCompat(context).apply {
+                        text = field.label
+                        isChecked = field.value.equals("true", ignoreCase = true)
+                    }
+                    readers[field.key] = { if (toggle.isChecked) "true" else "false" }
+                    column.addView(toggle)
+                    field.hint?.let { hint ->
+                        column.addView(
+                            TextView(context).apply {
+                                text = hint
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            },
+                        )
+                    }
+                }
+
+                KIND_CHOICE -> {
+                    val options = field.options
+                    val spinner = Spinner(context).apply {
+                        adapter = ArrayAdapter(
+                            context,
+                            android.R.layout.simple_spinner_item,
+                            options.map { it.label },
+                        ).apply {
+                            setDropDownViewResource(
+                                android.R.layout.simple_spinner_dropdown_item,
+                            )
+                        }
+                        val selected = options.indexOfFirst { it.value == field.value }
+                        if (selected >= 0) {
+                            setSelection(selected)
+                        }
+                    }
+                    readers[field.key] = {
+                        // The position, not the visible label: two keys may
+                        // legitimately be given the same name, and it is the
+                        // value behind the row that identifies which one.
+                        options.getOrNull(spinner.selectedItemPosition)?.value ?: ""
+                    }
+                    column.addView(spinner)
+                }
+
+                else -> {
+                    val editor = EditText(context).apply {
+                        setText(field.value)
+                        applyKind(this, field.kind)
+                        field.hint?.let { hint = it }
+                        // A key or a password must not be offered to autofill,
+                        // and must not be learned by the IME for suggestion.
+                        if (isSensitive(field.kind)) {
+                            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+                            setImportantForAccessibility(
+                                View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS,
+                            )
+                        }
+                    }
+                    if (isSensitive(field.kind)) {
+                        sensitive.add(editor)
+                    }
+                    readers[field.key] = { editor.text?.toString() ?: "" }
+                    column.addView(editor)
                 }
             }
-            editors[field.key] = editor
-            column.addView(editor)
 
             // Validation errors sit beside the field they belong to, with the
             // value the user typed still in it: a dialog that clears itself to
