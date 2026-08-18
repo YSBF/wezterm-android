@@ -2,13 +2,15 @@
 
 ## Status
 
-**Implemented, revision 3, phases 1--5.** This document described the next
+**Implemented, revision 3, phases 1--5 and 7.** This document described the next
 user-interface layer for the Android port: an in-terminal SSH host sidebar and a
-more usable extra-keys row.  Phases 1 to 5 are built; phase 6, which is
-on-device verification, has not been done because no device has been available.
-See "What was built" below for where each piece landed and where the
-implementation departed from what was written here, and "Phase 6" for the
-verification that is still owed.
+more usable extra-keys row.  Phases 1 to 5 are built, and phase 7 --- the
+keychain and the multiplexing option, which the plan did not foresee and the
+device made necessary --- is built on top of them.  Phase 6 is on-device
+verification and is partly done: a first session found four rendering defects
+and confirmed the connect path, then ran out of device.  See "What was built"
+below for where each piece landed and where the implementation departed from
+what was written here, and "Phase 6" for the verification that is still owed.
 
 The one statement above that did not survive contact: this *did* touch the
 renderer.  The box model had no clipping, and the pinned key cluster cannot be
@@ -121,11 +123,14 @@ The first release is deliberately limited to simple SSH profiles:
 * port, defaulting to `22`;
 * user name;
 * an optional key reference (see "Getting a key onto the device");
+* whether the session should outlive the tab (phase 7);
 * connect, edit, and delete actions.
 
 The sidebar also lists SSH domains supplied by `wezterm.lua`, marked as
 configuration-file entries.  They are read-only in the first release.  Hosts
-created in the app are managed separately.
+created in the app are managed separately.  Phase 7 added a third section for
+the keys themselves, because a key that is referenced by several profiles has to
+be manageable somewhere that is not inside one of them.
 
 Passwords must not be saved in the host profile.  Password authentication is
 entered at connection time through the native credential dialog described
@@ -553,9 +558,20 @@ bug rather than as one of the connection states phase 5 renders.
      backgrounded, then validate terminal and PTY resize behavior in pinned
      mode.
 
+7. **The keychain and the multiplexing option** --- added after phase 6, which
+   is where the need for both became visible.
+   * Add toggle and single-select field kinds to the dialog schema, and read the
+     form back through per-field closures rather than a map of text editors.
+   * Store keys as named entries shared between profiles, with the material in a
+     `keys/` directory beside `hosts.toml` and only an id in the toml.
+   * Give the profile a multiplexing flag, and make connect attach before it
+     spawns so the flag means something.
+   * Surface both in the sidebar and the host editor.
+
 Phases 1 and 2 are independent of each other.  Phase 5 is separated from phase 4
 because it is the only part that touches window geometry, and it should not be
-able to delay a working overlay sidebar.
+able to delay a working overlay sidebar.  Phase 7 was not planned; it is here
+because phase 6 put the code in front of a real server.
 
 ## What was built
 
@@ -672,6 +688,49 @@ owns the schema, `WezTermDialogs.kt` renders it.
   terminal.  That it is also Android's own "large screen" figure is a
   coincidence, arrived at from the other direction.
 
+### Phase 7, the keychain and the multiplexing option
+
+Not in the plan.  Both come from what phase 6 found on the device: a stored
+profile could only ever be a bare ssh shell, and a key could only be attached by
+pasting it again for every host that used it.  See "Stored profiles cannot keep
+state" below for the finding; this is what was built in answer to it.
+
+`wezterm-gui/src/hosts.rs`, `wezterm-gui/src/dialog.rs`,
+`wezterm-gui/src/termwindow/sidebar.rs`, `WezTermDialogs.kt`.
+
+* **Keys are named and shared, not owned by a host.**  The same key usually
+  opens several of them, and a key that lives inside a profile is a key to
+  re-paste per host and several copies to rotate.  `hosts.toml` gains a
+  `[[key]]` table of id and name; the private key goes to `keys/<id>` beside it
+  with `0600` and never into the toml.  A profile refers to it by id.  Export is
+  unchanged and still writes profiles only.
+* **The key directory is derived from the repository's path, not from the data
+  dir.**  Not tidiness: with a global path, a test that imports a key writes a
+  real private key into the developer's `~/.local/share` and leaves it there.
+  That happened before it was changed.
+* **Loading rejects two files that would otherwise fail later and quietly:**
+  two keys sharing an id, and a profile naming a key that is not there.
+  Deleting a key names the profiles about to lose it, is grave, and detaches
+  them in the same write, so there is no moment where a host points at a key
+  that is gone.
+* **Multiplexing is a bool on the profile** and picks a `ClientDomain` over a
+  `RemoteSshDomain`.  The toggle alone would have been a lie: `connect_to_profile`
+  always called `spawn_tab`, so a multiplexed profile would have made a fresh
+  pane on every tap and the state it was keeping would never have been seen
+  again.  It now attaches first and spawns only if the attach adopted no panes
+  --- a server with nothing running yet, or a first connection.  That is the same
+  thing `default_domain` does at startup, which is how the behaviour was
+  confirmed on the device before it was wired to the sidebar.
+* **The dialog schema gained a toggle and a single-select**, and with them the
+  Kotlin side stopped reading the form out of a map of `EditText`.  A `Switch`
+  and a `Spinner` have no text to read, so each field now contributes a closure
+  that knows how to read its own view.  That map had also been doubling as the
+  list of editors to wipe after answering; wiping is about secrets rather than
+  about being an `EditText`, so the two lists are now separate.
+* **A `Choice` answers with the selected option's value, not its label.**  Two
+  keys may be given the same name, and it is the id behind the row that says
+  which one was picked.
+
 ### Verified off-device
 
 `cargo build` for `aarch64-linux-android`, `cargo check` for the desktop target,
@@ -748,10 +807,16 @@ visible anywhere in the UI:
   came back, the first still showing the marker echoed into it before the app
   died, and the pane count stayed at two rather than growing.
 
-So the capability is present and works on Android; what is missing is any way for
-the sidebar to reach it.  A profile would need at least a multiplexing choice,
+So the capability is present and works on Android; what was missing was any way
+for the sidebar to reach it.  A profile needed at least a multiplexing choice,
 and "attach to what is already running" is a different action from "connect",
-which the single tap-to-connect row cannot express.
+which the single tap-to-connect row could not express.
+
+**Answered by phase 7 above.**  The profile carries the choice, and the tap does
+not have to express the difference because it no longer has to choose: connect
+attaches first and falls back to spawning only when the attach found nothing.
+The keychain came out of the same session --- the test host takes a key, and
+there was no way to give a profile one without pasting it again for each host.
 
 Still owed, because the device disconnected from USB mid-test, at the tap that
 would have started the connection:
@@ -798,6 +863,28 @@ would have started the connection:
 * **Domain accumulation.**  Edit and reconnect twenty times and watch memory.
   The decision to leak dead domains for the life of the process is recorded, not
   measured.
+
+Owed for phase 7, none of which has been on a device:
+
+* **The Keys section renders, and "+ Add key" opens the import dialog.**  The
+  section is new markup in the same list the four rendering defects above were
+  found in, so it has the same standing as they did before the device saw them.
+* **The picker and the switch in the host editor.**  A `Spinner` and a
+  `SwitchCompat` are the first non-`EditText` fields the dialog has ever built,
+  and the read path was rewritten around them.  Confirm the picker starts on the
+  profile's current key, that "No key" comes back as no key rather than as a key
+  named "No key", and that the switch's state survives submitting the form.
+* **That a multiplexed profile attaches rather than spawns.**  The check is the
+  one already used from `default_domain`: leave a marker in a server pane, tap
+  the profile, and confirm the marker is what appears and the server's pane count
+  does not grow.
+* **That an unmultiplexed profile still connects unchanged,** which is the path
+  every existing profile is on and the one the attach-first change runs past.
+* **Connecting with a key from the keychain.**  Import a key, attach it to a
+  profile, and confirm the connection uses it.  `check_key_material` only reads
+  the PEM envelope, so a key that is well-formed and wrong fails at connect time.
+* **The clipboard is empty after the import dialog is submitted,** and what
+  Android 13's clipboard preview showed on the way in.
 
 ## Out of scope
 
