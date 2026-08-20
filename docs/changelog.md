@@ -152,6 +152,10 @@ As features stabilize some brief notes about them will accumulate here.
   search matching. Thanks to @mrdziuban! #7385
 
 #### Fixed
+* mux: switching tabs in a client attached to a remote mux could bounce the
+  active tab back to where it was a moment later, because the server echoed the
+  focus change to the client that had asked for it. Over a slow link that echo
+  arrives after the user has already moved on.
 * Race condition when very quickly adjusting font scale, and other improvements
   around resizing. Thanks to @jknockel! #4876 #5032 #5033
 * macOS: wacky initial window size with external monitors or certain font
