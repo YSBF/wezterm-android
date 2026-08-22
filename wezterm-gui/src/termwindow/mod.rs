@@ -1386,6 +1386,12 @@ impl TermWindow {
                     // Also handled by wezterm-client
                     self.update_title_post_status();
                 }
+                MuxNotification::TabMoved { .. } => {
+                    // The move itself has already been applied to the mux
+                    // window, which invalidated us; this is just the tab bar
+                    // catching up with the new order.
+                    self.update_title_post_status();
+                }
                 MuxNotification::TabTitleChanged { .. } => {
                     self.update_title_post_status();
                 }
@@ -1608,6 +1614,7 @@ impl TermWindow {
                 return true;
             }
             MuxNotification::TabResized(tab_id)
+            | MuxNotification::TabMoved { tab_id, .. }
             | MuxNotification::TabTitleChanged { tab_id, .. } => {
                 let mux = Mux::get();
                 if mux.window_containing_tab(tab_id) == Some(mux_window_id) {
@@ -2355,8 +2362,8 @@ impl TermWindow {
 
     fn move_tab(&mut self, tab_idx: usize) -> anyhow::Result<()> {
         let mux = Mux::get();
-        let mut window = mux
-            .get_window_mut(self.mux_window_id)
+        let window = mux
+            .get_window(self.mux_window_id)
             .ok_or_else(|| anyhow!("no such window"))?;
 
         let max = window.len();
@@ -2366,11 +2373,18 @@ impl TermWindow {
 
         ensure!(tab_idx < max, "cannot move a tab out of range");
 
-        let tab_inst = window.remove_by_idx(active);
-        window.insert(tab_idx, &tab_inst);
-        window.set_active_without_saving(tab_idx);
+        let tab_id = window
+            .get_by_idx(active)
+            .map(|tab| tab.tab_id())
+            .ok_or_else(|| anyhow!("no active tab"))?;
+        // Describe the destination as the tab we'd end up following, so that
+        // the mux can pass the same description on to a remote mux whose
+        // idea of the tab indices may differ from ours.
+        let after_tab_id = window.tab_preceding_after_move(active, tab_idx);
 
         drop(window);
+        mux.move_tab(tab_id, after_tab_id)?;
+
         self.update_title();
         self.update_scrollbar();
 

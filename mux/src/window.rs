@@ -6,6 +6,37 @@ use std::sync::Arc;
 static WIN_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type WindowId = usize;
 
+/// The index at which the tab currently at `from_idx` must be re-inserted
+/// in order to end up immediately after the tab at `after_idx`, or first in
+/// the window if that is `None`.
+///
+/// The tab is lifted out before being put back, which shifts everything to
+/// its right down by one: landing after a tab to our right therefore means
+/// taking that tab's index, while landing after a tab to our left means
+/// taking the index just past it.
+fn idx_following(from_idx: usize, after_idx: Option<usize>) -> usize {
+    match after_idx {
+        Some(idx) if idx > from_idx => idx,
+        Some(idx) => idx + 1,
+        None => 0,
+    }
+}
+
+/// The inverse of `idx_following`: given a move of the tab at `from_idx` to
+/// `to_idx`, the index *in the list as it stands now* of the tab that the
+/// moved tab will end up following, or `None` if it will be first.
+fn idx_preceding_after_move(from_idx: usize, to_idx: usize) -> Option<usize> {
+    if to_idx == 0 {
+        None
+    } else if to_idx > from_idx {
+        // Everything between the two shuffles left to fill the gap, so the
+        // tab now at `to_idx` ends up on our left.
+        Some(to_idx)
+    } else {
+        Some(to_idx - 1)
+    }
+}
+
 pub struct Window {
     id: WindowId,
     tabs: Vec<Arc<Tab>>,
@@ -86,6 +117,62 @@ impl Window {
         self.check_that_tab_isnt_already_in_window(tab);
         self.tabs.push(Arc::clone(tab));
         self.invalidate();
+    }
+
+    /// Move the tab at `from_idx` so that it sits at `to_idx`, sliding the
+    /// tabs in between along to make room. Whichever tab was active stays
+    /// active; only its index changes, so this deliberately assigns
+    /// `self.active` directly rather than going through
+    /// `set_active_without_saving`, which would tell the active pane it had
+    /// lost the focus.
+    ///
+    /// Returns false, having done nothing, if either index is out of range
+    /// or the tab is already where it was asked to go.
+    pub fn move_tab(&mut self, from_idx: usize, to_idx: usize) -> bool {
+        let len = self.tabs.len();
+        if from_idx >= len || to_idx >= len || from_idx == to_idx {
+            return false;
+        }
+
+        let active = self.get_active().map(|tab| tab.tab_id());
+        let tab = self.tabs.remove(from_idx);
+        self.tabs.insert(to_idx, tab);
+        if let Some(idx) = active.and_then(|id| self.idx_by_id(id)) {
+            self.active = idx;
+        }
+        self.invalidate();
+        true
+    }
+
+    /// Move `tab_id` so that it immediately follows `after_tab_id`, or to
+    /// the front of the window if that is `None`.
+    /// Returns false if either tab isn't in this window, or if the tab is
+    /// already in that position.
+    pub fn move_tab_after(&mut self, tab_id: TabId, after_tab_id: Option<TabId>) -> bool {
+        let from_idx = match self.idx_by_id(tab_id) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        if after_tab_id == Some(tab_id) {
+            return false;
+        }
+        let after_idx = match after_tab_id {
+            Some(after_tab_id) => match self.idx_by_id(after_tab_id) {
+                Some(idx) => Some(idx),
+                None => return false,
+            },
+            None => None,
+        };
+        self.move_tab(from_idx, idx_following(from_idx, after_idx))
+    }
+
+    /// Which tab would the tab at `from_idx` come to sit after, were it moved
+    /// to `to_idx`? `None` means it would be the first tab in the window.
+    /// This is the form in which a move is described to a remote mux, whose
+    /// indices need not line up with ours; see codec::MoveTab.
+    pub fn tab_preceding_after_move(&self, from_idx: usize, to_idx: usize) -> Option<TabId> {
+        let idx = idx_preceding_after_move(from_idx, to_idx)?;
+        self.tabs.get(idx).map(|tab| tab.tab_id())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -263,6 +350,115 @@ impl Window {
 
         if invalidated {
             self.invalidate();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Re-inserting a tab that has been lifted out of the list is one of
+    /// those places where being off by one is easy and quiet, so pin the
+    /// arithmetic down here rather than discovering it as tabs that land
+    /// one place to the left of where they were dropped.
+    #[test]
+    fn idx_following_accounts_for_the_lifted_tab() {
+        // Tabs [a b c d]; moving `a` (0) after each of the others.
+        assert_eq!(idx_following(0, Some(1)), 1); // [b a c d]
+        assert_eq!(idx_following(0, Some(3)), 3); // [b c d a]
+
+        // Moving `d` (3) after each of the others.
+        assert_eq!(idx_following(3, Some(0)), 1); // [a d b c]
+        assert_eq!(idx_following(3, Some(2)), 3); // unchanged
+
+        // Moving to the front is just index 0, wherever we started.
+        assert_eq!(idx_following(0, None), 0);
+        assert_eq!(idx_following(2, None), 0);
+
+        // Staying put: `b` (1) is already immediately after `a` (0).
+        assert_eq!(idx_following(1, Some(0)), 1);
+    }
+
+    /// Describing a move by naming a neighbour is only useful if the two
+    /// directions agree, so check that a move to `to_idx` and the neighbour
+    /// we report for it are the same move.
+    #[test]
+    fn idx_following_and_idx_preceding_are_inverses() {
+        for len in 1..6 {
+            for from_idx in 0..len {
+                for to_idx in 0..len {
+                    let after_idx = idx_preceding_after_move(from_idx, to_idx);
+                    assert_eq!(
+                        idx_following(from_idx, after_idx),
+                        to_idx,
+                        "moving {from_idx} -> {to_idx} of {len} was described \
+                         as following {after_idx:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And the description has to survive the trip: what the mover means by
+    /// "after tab X" must be what the other end does with it, even though
+    /// they are working from different lists.
+    #[test]
+    fn a_described_move_reproduces_the_same_order() {
+        // Ours: [a b c d]. Theirs has an extra tab we haven't heard about,
+        // and lacks one of ours, so the indices don't line up at all.
+        let ours = ["a", "b", "c", "d"];
+        let theirs = ["z", "a", "b", "d"];
+
+        for from_idx in 0..ours.len() {
+            for to_idx in 0..ours.len() {
+                let mut expected: Vec<&str> = ours.to_vec();
+                let moved = expected.remove(from_idx);
+                expected.insert(
+                    idx_following(from_idx, idx_preceding_after_move(from_idx, to_idx)),
+                    moved,
+                );
+
+                // What we'd put on the wire: the name of the tab we now follow.
+                let after = idx_preceding_after_move(from_idx, to_idx).map(|idx| ours[idx]);
+
+                // What the other end does with it.
+                let mut got: Vec<&str> = theirs.to_vec();
+                let their_from = match got.iter().position(|t| *t == moved) {
+                    Some(idx) => idx,
+                    // Not a tab they have; nothing to check.
+                    None => continue,
+                };
+                let their_after = match after {
+                    Some(after) => match got.iter().position(|t| *t == after) {
+                        Some(idx) => Some(idx),
+                        // They don't have the tab we named, so they leave
+                        // things alone rather than guess.
+                        None => continue,
+                    },
+                    None => None,
+                };
+                let tab = got.remove(their_from);
+                got.insert(idx_following(their_from, their_after), tab);
+
+                // The tabs they share with us must end up in the order we
+                // put them in, whatever else is interleaved.
+                let ours_only: Vec<&str> = got
+                    .iter()
+                    .copied()
+                    .filter(|t| expected.contains(t))
+                    .collect();
+                let theirs_only: Vec<&str> = expected
+                    .iter()
+                    .copied()
+                    .filter(|t| got.contains(t))
+                    .collect();
+                assert_eq!(
+                    ours_only, theirs_only,
+                    "moving {moved} ({from_idx} -> {to_idx}) after {after:?}: \
+                     we have {expected:?}, they have {got:?}"
+                );
+            }
         }
     }
 }

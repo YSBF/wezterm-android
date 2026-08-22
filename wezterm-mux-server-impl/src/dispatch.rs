@@ -18,15 +18,15 @@ pub trait AsRawDesc: std::os::windows::io::AsRawSocket + std::os::windows::io::A
 impl AsRawDesc for UnixStream {}
 impl AsRawDesc for AsyncSslStream {}
 
-/// Should a PaneFocused notification attributed to `origin` be sent to the
-/// client on the other end of this session?
+/// Should a notification attributed to `origin` be sent to the client on the
+/// other end of this session?
 ///
-/// Not if that client is the one who asked for it: it moved its own view the
+/// Not if that client is the one who asked for it: it changed its own view the
 /// moment the user pressed the key and doesn't need our permission. Telling it
 /// again would be worse than redundant, because over a slow link the user has
-/// often moved on to another tab by the time the notification lands, and
-/// applying it would drag them back to where they were.
-fn should_forward_pane_focused(
+/// often moved on by the time the notification lands, and applying it would
+/// drag them back to where they were.
+fn should_forward_to_session(
     origin: &Option<Arc<ClientId>>,
     session_client_id: &Option<Arc<ClientId>>,
 ) -> bool {
@@ -189,12 +189,28 @@ where
                 }
             }
             Ok(Item::Notif(MuxNotification::PaneFocused { pane_id, origin })) => {
-                if !should_forward_pane_focused(&origin, &handler.client_id()) {
+                if !should_forward_to_session(&origin, &handler.client_id()) {
                     continue;
                 }
                 Pdu::PaneFocused(codec::PaneFocused { pane_id })
                     .encode_async(&mut stream, 0)
                     .await?;
+                stream.flush().await.context("flushing PDU to client")?;
+            }
+            Ok(Item::Notif(MuxNotification::TabMoved {
+                tab_id,
+                after_tab_id,
+                origin,
+            })) => {
+                if !should_forward_to_session(&origin, &handler.client_id()) {
+                    continue;
+                }
+                Pdu::MoveTab(codec::MoveTab {
+                    tab_id,
+                    after_tab_id,
+                })
+                .encode_async(&mut stream, 0)
+                .await?;
                 stream.flush().await.context("flushing PDU to client")?;
             }
             Ok(Item::Notif(MuxNotification::TabResized(tab_id))) => {
@@ -241,33 +257,34 @@ where
 mod test {
     use super::*;
 
-    /// A client that asks the mux to move the focus has already moved its own
-    /// view to match, so the notification that results from its request must
-    /// not be sent back to it. Everyone else still needs to hear about it.
+    /// A client that asks the mux to move the focus, or to move a tab, has
+    /// already changed its own view to match, so the notification that results
+    /// from its request must not be sent back to it. Everyone else still needs
+    /// to hear about it.
     #[test]
-    fn pane_focused_is_not_echoed_to_the_client_that_asked() {
+    fn changes_are_not_echoed_to_the_client_that_asked() {
         let me = Arc::new(ClientId::new());
         let someone_else = Arc::new(ClientId::new());
 
         // The echo of our own request.
-        assert!(!should_forward_pane_focused(
+        assert!(!should_forward_to_session(
             &Some(me.clone()),
             &Some(me.clone())
         ));
 
         // Another attached client, or a `wezterm cli activate-pane` run by
         // some script: this is news to us and we want it.
-        assert!(should_forward_pane_focused(
+        assert!(should_forward_to_session(
             &Some(someone_else),
             &Some(me.clone())
         ));
 
-        // A focus change the mux made by itself, on nobody's behalf.
-        assert!(should_forward_pane_focused(&None, &Some(me)));
+        // A change the mux made by itself, on nobody's behalf.
+        assert!(should_forward_to_session(&None, &Some(me)));
 
         // A session that hasn't identified itself yet can't be the one that
         // asked, so it hears about everything.
-        assert!(should_forward_pane_focused(
+        assert!(should_forward_to_session(
             &Some(Arc::new(ClientId::new())),
             &None
         ));

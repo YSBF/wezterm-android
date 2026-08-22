@@ -152,6 +152,15 @@ As features stabilize some brief notes about them will accumulate here.
   search matching. Thanks to @mrdziuban! #7385
 
 #### Fixed
+* mux: tabs rearranged with [`MoveTab`](config/lua/keyassignment/MoveTab.md) or
+  [`MoveTabRelative`](config/lua/keyassignment/MoveTabRelative.md) in a client
+  attached to a remote mux went back to their old order when reconnecting: the
+  new order was only ever held by that client. The move is now sent to the mux,
+  which records it and passes it on to any other attached clients. Both ends
+  need to be updated for this to take effect.
+* mux: the windows in a mux server were listed to attaching clients in an
+  arbitrary order, so a client could be shown its windows in a different
+  arrangement each time it attached. They are now listed in creation order.
 * mux: switching tabs in a client attached to a remote mux could bounce the
   active tab back to where it was a moment later, because the server echoed the
   focus change to the client that had asked for it. Over a slow link that echo

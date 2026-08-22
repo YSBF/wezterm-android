@@ -388,6 +388,30 @@ impl SessionHandler {
                 })
                 .detach();
             }
+            Pdu::MoveTab(MoveTab {
+                tab_id,
+                after_tab_id,
+            }) => {
+                let client_id = self.client_id.clone();
+                spawn_into_main_thread(async move {
+                    catch(
+                        move || {
+                            let mux = Mux::get();
+                            let _identity = mux.with_identity(client_id);
+
+                            // The requesting client has already moved the tab
+                            // in its own view; the resulting notification is
+                            // attributed to it, so it goes to the other
+                            // clients rather than back where it came from.
+                            mux.move_tab(tab_id, after_tab_id)?;
+
+                            Ok(Pdu::UnitResponse(UnitResponse {}))
+                        },
+                        send_response,
+                    )
+                })
+                .detach();
+            }
             Pdu::GetClientList(GetClientList) => {
                 spawn_into_main_thread(async move {
                     catch(

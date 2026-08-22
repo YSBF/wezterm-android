@@ -161,6 +161,15 @@ pub trait Domain: Downcast + Send + Sync {
         Ok(None)
     }
 
+    /// Called after the mux has moved `tab_id` to a new position within
+    /// `window_id`, with the window already in its new order.
+    ///
+    /// Domains whose tabs really live in another mux use this to pass the new
+    /// order along, so that it is still there the next time a client attaches.
+    /// For a local domain the mux's own state is the record, and there is
+    /// nothing to do.
+    fn advise_tab_moved(&self, _window_id: WindowId, _tab_id: TabId) {}
+
     /// Returns false if the `spawn` method will never succeed.
     /// There are some internal placeholder domains that are
     /// pre-created with local UI that we do not want to allow

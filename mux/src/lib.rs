@@ -92,6 +92,18 @@ pub enum MuxNotification {
         origin: Option<Arc<ClientId>>,
     },
     TabResized(TabId),
+    /// A tab has been moved to a different position within its window.
+    /// The position is described as the tab it now follows, since that
+    /// survives the two ends of a mux connection disagreeing about how
+    /// many tabs there are; see codec::MoveTab.
+    TabMoved {
+        tab_id: TabId,
+        after_tab_id: Option<TabId>,
+        /// The client that asked for the move, if any. It has already
+        /// applied the move to its own view, for the same reasons set out
+        /// for `PaneFocused` above.
+        origin: Option<Arc<ClientId>>,
+    },
     TabTitleChanged {
         tab_id: TabId,
         title: String,
@@ -526,6 +538,53 @@ impl Mux {
     pub fn notify_pane_focused(&self, pane_id: PaneId) {
         let origin = self.identity.read().clone();
         self.notify(MuxNotification::PaneFocused { pane_id, origin });
+    }
+
+    /// Notify subscribers that `tab_id` now follows `after_tab_id` within
+    /// its window, attributing the move to whichever client we are acting
+    /// on behalf of so that it isn't echoed back to them.
+    pub fn notify_tab_moved(&self, tab_id: TabId, after_tab_id: Option<TabId>) {
+        let origin = self.identity.read().clone();
+        self.notify(MuxNotification::TabMoved {
+            tab_id,
+            after_tab_id,
+            origin,
+        });
+    }
+
+    /// Move `tab_id` within its window so that it immediately follows
+    /// `after_tab_id`, or to the front of the window if that is `None`.
+    ///
+    /// Tab order is something the user arranges by hand and expects to find
+    /// again later, so it belongs to the mux that owns the tabs rather than
+    /// to whichever client happens to be displaying them. The domain that
+    /// owns the tab is told, so that a mux on the other end of a connection
+    /// can record the new order, and subscribers are notified, so that any
+    /// other client watching this window can follow along.
+    pub fn move_tab(&self, tab_id: TabId, after_tab_id: Option<TabId>) -> anyhow::Result<()> {
+        let window_id = self
+            .window_containing_tab(tab_id)
+            .ok_or_else(|| anyhow::anyhow!("tab {tab_id} is not in any window"))?;
+
+        let moved = {
+            let mut window = self
+                .get_window_mut(window_id)
+                .ok_or_else(|| anyhow::anyhow!("window {window_id} not found"))?;
+            window.move_tab_after(tab_id, after_tab_id)
+        };
+
+        if moved {
+            if let Some(domain) = self
+                .get_tab(tab_id)
+                .and_then(|tab| tab.get_active_pane())
+                .and_then(|pane| self.get_domain(pane.domain_id()))
+            {
+                domain.advise_tab_moved(window_id, tab_id);
+            }
+            self.notify_tab_moved(tab_id, after_tab_id);
+        }
+
+        Ok(())
     }
 
     pub fn resolve_focused_pane(
@@ -1087,8 +1146,15 @@ impl Mux {
         windows
     }
 
+    /// Sorted by window id, which is to say in the order the windows were
+    /// created. The order matters because this is what a mux server walks
+    /// when a client asks it for the panes, and a client that attaches twice
+    /// should be shown the same arrangement both times; a HashMap's idea of
+    /// an order is its own business.
     pub fn iter_windows(&self) -> Vec<WindowId> {
-        self.windows.read().keys().cloned().collect()
+        let mut windows: Vec<WindowId> = self.windows.read().keys().cloned().collect();
+        windows.sort();
+        windows
     }
 
     pub fn iter_domains(&self) -> Vec<Arc<dyn Domain>> {

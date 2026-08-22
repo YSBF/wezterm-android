@@ -441,7 +441,7 @@ macro_rules! pdu {
 /// The overall version of the codec.
 /// This must be bumped when backwards incompatible changes
 /// are made to the types and protocol.
-pub const CODEC_VERSION: usize = 45;
+pub const CODEC_VERSION: usize = 46;
 
 // Defines the Pdu enum.
 // Each struct has an explicit identifying number.
@@ -502,6 +502,7 @@ pdu! {
     GetPaneDirection: 60,
     GetPaneDirectionResponse: 61,
     AdjustPaneSize: 62,
+    MoveTab: 63,
 }
 
 impl Pdu {
@@ -805,6 +806,24 @@ pub struct TabAddedToWindow {
 #[derive(Deserialize, Serialize, PartialEq, Debug)]
 pub struct TabResized {
     pub tab_id: TabId,
+}
+
+/// Used both as a request from client->server, when the user has dragged
+/// or otherwise moved a tab, and as a notification from server->client to
+/// tell the other attached clients where the tab went.
+///
+/// The new position is expressed as the tab it now follows rather than as
+/// an index, because the two ends do not necessarily agree on indices: a
+/// client can hold tabs from more than one remote window in a single local
+/// window, and it may not yet have heard about tabs that another client
+/// has just spawned. Naming a neighbour is unambiguous in a way that
+/// counting from the left is not.
+#[derive(Deserialize, Serialize, PartialEq, Debug)]
+pub struct MoveTab {
+    pub tab_id: TabId,
+    /// Place `tab_id` immediately after this tab. `None` places it first
+    /// in the window.
+    pub after_tab_id: Option<TabId>,
 }
 
 #[derive(Deserialize, Serialize, PartialEq, Debug)]

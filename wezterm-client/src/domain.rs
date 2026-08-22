@@ -491,6 +491,62 @@ impl ClientDomain {
         }
     }
 
+    /// Another client has moved a tab within the window it shares with us;
+    /// put ours in the same place.
+    pub fn process_remote_tab_moved(
+        &self,
+        remote_tab_id: TabId,
+        after_remote_tab_id: Option<TabId>,
+    ) {
+        let inner = match self.inner() {
+            Some(inner) => inner,
+            None => return,
+        };
+        let tab_id = match inner.remote_to_local_tab_id(remote_tab_id) {
+            Some(tab_id) => tab_id,
+            None => return,
+        };
+
+        let mux = Mux::get();
+        let window_id = match mux.window_containing_tab(tab_id) {
+            Some(window_id) => window_id,
+            None => return,
+        };
+        let mut window = match mux.get_window_mut(window_id) {
+            Some(window) => window,
+            None => return,
+        };
+
+        match after_remote_tab_id {
+            Some(after_remote_tab_id) => match inner.remote_to_local_tab_id(after_remote_tab_id) {
+                Some(after_tab_id) => {
+                    window.move_tab_after(tab_id, Some(after_tab_id));
+                }
+                None => {
+                    // We don't know the tab it is supposed to follow, so we
+                    // have no way to place it; leave it where it is rather
+                    // than put it somewhere wrong. The next resync will
+                    // straighten us out.
+                    log::debug!(
+                        "remote tab {remote_tab_id} was moved after remote tab \
+                         {after_remote_tab_id}, which we don't know about"
+                    );
+                }
+            },
+            None => {
+                // First in the remote window is not necessarily first in
+                // ours: this window can be showing tabs from another domain
+                // as well, and those keep their place.
+                let first_of_ours = window
+                    .iter()
+                    .position(|tab| inner.local_to_remote_tab(tab.tab_id()).is_some());
+                if let (Some(to_idx), Some(from_idx)) = (first_of_ours, window.idx_by_id(tab_id)) {
+                    window.move_tab(from_idx, to_idx);
+                }
+            }
+        }
+    }
+
     pub fn process_remote_tab_title_change(&self, remote_tab_id: TabId, title: String) {
         if let Some(inner) = self.inner() {
             if let Some(local_tab_id) = inner.remote_to_local_tab_id(remote_tab_id) {
@@ -758,6 +814,51 @@ impl Domain for ClientDomain {
         _command_dir: Option<String>,
     ) -> anyhow::Result<Arc<dyn Pane>> {
         anyhow::bail!("spawn_pane not implemented for ClientDomain")
+    }
+
+    /// Tab order is part of how the user has arranged the remote mux, so tell
+    /// it where the tab went; otherwise the arrangement lives only in this
+    /// client and is lost the moment it goes away.
+    fn advise_tab_moved(&self, window_id: WindowId, tab_id: TabId) {
+        let inner = match self.inner() {
+            Some(inner) => inner,
+            None => return,
+        };
+        let remote_tab_id = match inner.local_to_remote_tab(tab_id) {
+            Some(remote_tab_id) => remote_tab_id,
+            None => return,
+        };
+
+        // Describe the new position as the tab it now follows. Only tabs the
+        // remote knows about will do: this window may also be showing tabs
+        // from another domain, so we look past those to the nearest one of
+        // ours on the left, and say "first" if there isn't one.
+        let after_tab_id = match Mux::get().get_window(window_id) {
+            Some(window) => {
+                let mut preceding = None;
+                for tab in window.iter() {
+                    if tab.tab_id() == tab_id {
+                        break;
+                    }
+                    if let Some(remote) = inner.local_to_remote_tab(tab.tab_id()) {
+                        preceding.replace(remote);
+                    }
+                }
+                preceding
+            }
+            None => return,
+        };
+
+        promise::spawn::spawn(async move {
+            inner
+                .client
+                .move_tab(codec::MoveTab {
+                    tab_id: remote_tab_id,
+                    after_tab_id,
+                })
+                .await
+        })
+        .detach();
     }
 
     /// Forward the request to the remote; we need to translate the local ids
