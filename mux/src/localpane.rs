@@ -101,7 +101,10 @@ impl CachedLeaderInfo {
         self.pid = unsafe { libc::tcgetpgrp(self.fd) } as u32;
         if self.pid > 0 {
             self.path = LocalProcessInfo::executable_path(self.pid);
-            self.current_working_dir = LocalProcessInfo::current_working_dir(self.pid);
+            // A privileged helper hides its cwd from us, but the process it
+            // started on our behalf can still tell us where we are.
+            self.current_working_dir = LocalProcessInfo::current_working_dir(self.pid)
+                .or_else(|| descendant_current_working_dir(self.pid));
         } else {
             self.path.take();
             self.current_working_dir.take();
@@ -113,6 +116,31 @@ impl CachedLeaderInfo {
     fn expired(&self) -> bool {
         self.updated.elapsed() > PROC_INFO_CACHE_TTL
     }
+}
+
+/// The foreground process group leader may be a privileged helper such as
+/// `sudo`, `doas` or `su`. Its cwd is owned by root, so we are not allowed to
+/// read it and the leader alone tells us nothing about where the user is.
+/// Look for the closest descendant whose cwd we can read: that is the shell or
+/// program that the helper started on our behalf.
+///
+/// This walks the process table, so it is only worth doing when the leader
+/// itself didn't answer; the result is cached for `PROC_INFO_CACHE_TTL`.
+#[cfg(unix)]
+fn descendant_current_working_dir(pid: u32) -> Option<std::path::PathBuf> {
+    let root = LocalProcessInfo::with_root_pid(pid)?;
+
+    // Breadth first, so that we prefer the process closest to the leader
+    let mut queue: std::collections::VecDeque<&LocalProcessInfo> = root.children.values().collect();
+    while let Some(proc) = queue.pop_front() {
+        // procinfo leaves this empty when it couldn't read the cwd
+        if !proc.cwd.as_os_str().is_empty() {
+            return Some(proc.cwd.clone());
+        }
+        queue.extend(proc.children.values());
+    }
+
+    None
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
