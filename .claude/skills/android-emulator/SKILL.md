@@ -159,7 +159,16 @@ E emuglGLESv2_enc: ... s_glMapBufferRange:3424 GL error 0x502
 alongside the write bit, and GLES forbids that combination when the read bit is
 also set; desktop GL allows it. Since glium's write-only mapping exposes no
 slice, `TripleVertexBuffer::map` now takes a `GliumStagedVertexBuffer` path on
-GLES: fill a `Vec`, then `glBufferSubData` the touched range back on drop.
+GLES: write into a `Vec`, then `glBufferSubData` the touched range back on drop.
+
+The staging `Vec` belongs to the `TripleVertexBuffer`, not to the mapping, and
+that is load-bearing. `render_element` maps a layer once per *element*, not once
+per frame, and each of those mappings writes only its own quads while
+`next_quad` keeps climbing. A real mapping leaves the rest of the buffer alone;
+staging that started empty each time uploaded zeroes over everything the earlier
+elements had drawn. The symptom was a frame holding only the last element
+rendered into each layer — the tab bar reduced to its close button, the key row
+to a single key.
 
 When something dies in the renderer, check the `emuglGLESv2_enc` tag before
 believing the Rust backtrace — a GL error there explains a null-pointer panic

@@ -178,6 +178,7 @@ impl MappedVertexBuffer {
         match self {
             Self::Glium(g) => &mut g.mapping[range],
             Self::GliumStaged(g) => {
+                g.low_water = g.low_water.min(range.start);
                 g.high_water = g.high_water.max(range.end);
                 &mut g.staging[range]
             }
@@ -295,25 +296,37 @@ pub struct GliumMappedVertexBuffer {
 /// `glMapBufferRange` returns null and glium dereferences it. Desktop GL has no
 /// such restriction, which is why only GLES needs this path.
 ///
-/// Instead of mapping we fill a plain `Vec` and push the region that was
+/// Instead of mapping we write into a plain `Vec` and push the region that was
 /// actually touched back with `glBufferSubData` when the mapping is released.
+///
+/// The `Vec` is owned by the `TripleVertexBuffer` rather than by this struct,
+/// because it has to mirror the GPU buffer for as long as that buffer lives. A
+/// layer is mapped once per element rendered into it, not once per frame, and
+/// each of those mappings writes only its own quads while `next_quad` keeps
+/// climbing. A real mapping leaves the rest of the buffer alone; staging that
+/// started empty each time would instead upload zeroes over every quad the
+/// earlier elements had written, and they would vanish from the frame.
 pub struct GliumStagedVertexBuffer {
-    staging: Vec<Vertex>,
-    /// One past the highest vertex index handed out by `slice_mut`, so that we
-    /// upload only what was written rather than the whole buffer.
+    staging: RefMut<'static, Vec<Vertex>>,
+    /// The range handed out by `slice_mut` during this mapping, so that we
+    /// upload only what was touched rather than the whole buffer. `low_water`
+    /// starts at `usize::MAX` so that the first `min` takes it.
+    low_water: usize,
     high_water: usize,
+    // Drop the owner after the staging borrow
     owner: RefMut<'static, VertexBuffer>,
 }
 
 impl Drop for GliumStagedVertexBuffer {
     fn drop(&mut self) {
-        if self.high_water == 0 {
+        if self.low_water >= self.high_water {
             return;
         }
-        match self.owner.glium().slice(0..self.high_water) {
-            Some(slice) => slice.write(&self.staging[0..self.high_water]),
+        match self.owner.glium().slice(self.low_water..self.high_water) {
+            Some(slice) => slice.write(&self.staging[self.low_water..self.high_water]),
             None => log::error!(
-                "vertex buffer is too small to write back {} vertices",
+                "vertex buffer is too small to write back vertices {}..{}",
+                self.low_water,
                 self.high_water
             ),
         }
@@ -366,6 +379,9 @@ impl<'a> QuadAllocator for MappedQuads<'a> {
 pub struct TripleVertexBuffer {
     pub index: RefCell<usize>,
     pub bufs: RefCell<[VertexBuffer; 3]>,
+    /// CPU-side mirror of each of `bufs`, used only on the GLES staging path;
+    /// see `GliumStagedVertexBuffer`. Empty on backends that can map directly.
+    pub staging: RefCell<[Vec<Vertex>; 3]>,
     pub indices: IndexBuffer,
     pub capacity: usize,
     pub next_quad: RefCell<usize>,
@@ -460,7 +476,8 @@ impl TripleVertexBuffer {
         let mapping = match &mut *bufs {
             VertexBuffer::Glium(_) if use_staging => {
                 MappedVertexBuffer::GliumStaged(GliumStagedVertexBuffer {
-                    staging: vec![Vertex::default(); self.capacity * VERTICES_PER_CELL],
+                    staging: self.current_staging_mut(),
+                    low_water: usize::MAX,
                     high_water: 0,
                     owner: bufs,
                 })
@@ -492,6 +509,12 @@ impl TripleVertexBuffer {
         let index = *self.index.borrow();
         let bufs = self.bufs.borrow_mut();
         unsafe { RefMut::map(bufs, |bufs| &mut bufs[index]).extend_lifetime() }
+    }
+
+    fn current_staging_mut(&self) -> RefMut<'static, Vec<Vertex>> {
+        let index = *self.index.borrow();
+        let staging = self.staging.borrow_mut();
+        unsafe { RefMut::map(staging, |staging| &mut staging[index]).extend_lifetime() }
     }
 
     pub fn next_index(&self) {
@@ -589,6 +612,13 @@ impl RenderLayer {
             indices.push(idx + V_BOT_RIGHT as u32);
         }
 
+        // The buffers above are initialized from `verts`, so a mirror that
+        // starts out as the same default vertices is accurate.
+        let staging = |context: &RenderContext| match context {
+            RenderContext::Glium(c) if c.get_version().0 == Api::GlEs => verts.clone(),
+            _ => vec![],
+        };
+
         let buffer = TripleVertexBuffer {
             index: RefCell::new(0),
             bufs: RefCell::new([
@@ -596,6 +626,7 @@ impl RenderLayer {
                 context.allocate_vertex_buffer(num_quads, &verts)?,
                 context.allocate_vertex_buffer(num_quads, &verts)?,
             ]),
+            staging: RefCell::new([staging(context), staging(context), staging(context)]),
             capacity: num_quads,
             indices: context.allocate_index_buffer(&indices)?,
             next_quad: RefCell::new(0),
