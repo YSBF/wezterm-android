@@ -61,8 +61,8 @@
 //! so that the terminal grid does not draw underneath it.
 
 use crate::termwindow::box_model::{
-    BoxDimension, ComputedElement, ComputedElementContent, Corners, DisplayType, Element,
-    ElementColors, ElementContent, Float, InheritableColor, LayoutContext, SizedPoly,
+    BorderColor, BoxDimension, ComputedElement, ComputedElementContent, Corners, DisplayType,
+    Element, ElementColors, ElementContent, Float, InheritableColor, LayoutContext, SizedPoly,
     VerticalAlign,
 };
 use crate::termwindow::render::corners::{
@@ -567,13 +567,18 @@ impl TermWindow {
                     poly: BOTTOM_RIGHT_ROUNDED_CORNER,
                 },
             }))
+            // The rounded corners are drawn in the *border* colour: the
+            // background fill leaves those four squares alone so that the
+            // corner poly can shape them. A key has no visible border, so the
+            // border colour has to track the background, or the corners stay
+            // unpainted and the key renders as a cross.
             .colors(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(bg),
                 bg: InheritableColor::Color(bg),
                 text: InheritableColor::Color(text),
             })
             .hover_colors(Some(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(self.key_row_pressed_bg()),
                 bg: InheritableColor::Color(self.key_row_pressed_bg()),
                 text: InheritableColor::Color(text),
             }))
