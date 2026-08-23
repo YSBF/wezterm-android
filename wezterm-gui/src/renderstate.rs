@@ -7,7 +7,7 @@ use ::window::bitmaps::Texture2d;
 use ::window::glium::backend::Context as GliumContext;
 use ::window::glium::buffer::{BufferMutSlice, Mapping};
 use ::window::glium::{
-    CapabilitiesSource, IndexBuffer as GliumIndexBuffer, VertexBuffer as GliumVertexBuffer,
+    Api, CapabilitiesSource, IndexBuffer as GliumIndexBuffer, VertexBuffer as GliumVertexBuffer,
 };
 use ::window::*;
 use anyhow::Context;
@@ -169,6 +169,7 @@ impl VertexBuffer {
 
 enum MappedVertexBuffer {
     Glium(GliumMappedVertexBuffer),
+    GliumStaged(GliumStagedVertexBuffer),
     WebGpu(WebGpuMappedVertexBuffer),
 }
 
@@ -176,6 +177,10 @@ impl MappedVertexBuffer {
     fn slice_mut(&mut self, range: std::ops::Range<usize>) -> &mut [Vertex] {
         match self {
             Self::Glium(g) => &mut g.mapping[range],
+            Self::GliumStaged(g) => {
+                g.high_water = g.high_water.max(range.end);
+                &mut g.staging[range]
+            }
             Self::WebGpu(g) => {
                 let mapping: &mut [Vertex] = bytemuck::cast_slice_mut(&mut g.mapping);
                 &mut mapping[range]
@@ -280,6 +285,39 @@ pub struct GliumMappedVertexBuffer {
     mapping: Mapping<'static, [Vertex]>,
     // Drop the owner after the mapping
     _owner: RefMut<'static, VertexBuffer>,
+}
+
+/// Stand-in for `GliumMappedVertexBuffer` on backends that cannot hand us a
+/// read+write mapping.
+///
+/// glium always asks for `GL_MAP_FLUSH_EXPLICIT_BIT` alongside the write bit,
+/// and OpenGL ES rejects that combination when the read bit is also set, so
+/// `glMapBufferRange` returns null and glium dereferences it. Desktop GL has no
+/// such restriction, which is why only GLES needs this path.
+///
+/// Instead of mapping we fill a plain `Vec` and push the region that was
+/// actually touched back with `glBufferSubData` when the mapping is released.
+pub struct GliumStagedVertexBuffer {
+    staging: Vec<Vertex>,
+    /// One past the highest vertex index handed out by `slice_mut`, so that we
+    /// upload only what was written rather than the whole buffer.
+    high_water: usize,
+    owner: RefMut<'static, VertexBuffer>,
+}
+
+impl Drop for GliumStagedVertexBuffer {
+    fn drop(&mut self) {
+        if self.high_water == 0 {
+            return;
+        }
+        match self.owner.glium().slice(0..self.high_water) {
+            Some(slice) => slice.write(&self.staging[0..self.high_water]),
+            None => log::error!(
+                "vertex buffer is too small to write back {} vertices",
+                self.high_water
+            ),
+        }
+    }
 }
 
 impl<'a> QuadAllocator for MappedQuads<'a> {
@@ -412,7 +450,21 @@ impl TripleVertexBuffer {
         // we can then store in the same struct.
         // This is "safe" because we carry them around together and ensure
         // that the owner is dropped after the derived data.
+
+        // See GliumStagedVertexBuffer for why GLES gets no mapping at all.
+        let use_staging = match &*bufs {
+            VertexBuffer::Glium(vb) => vb.get_context().get_version().0 == Api::GlEs,
+            VertexBuffer::WebGpu(_) => false,
+        };
+
         let mapping = match &mut *bufs {
+            VertexBuffer::Glium(_) if use_staging => {
+                MappedVertexBuffer::GliumStaged(GliumStagedVertexBuffer {
+                    staging: vec![Vertex::default(); self.capacity * VERTICES_PER_CELL],
+                    high_water: 0,
+                    owner: bufs,
+                })
+            }
             VertexBuffer::Glium(vb) => {
                 let buf_slice = unsafe {
                     vb.slice_mut(..)
@@ -575,6 +627,10 @@ pub struct RenderState {
     pub glyph_cache: RefCell<GlyphCache>,
     pub util_sprites: UtilSprites,
     pub glyph_prog: Option<glium::Program>,
+    /// Whether `glyph_prog` was built with a second colour output. False means
+    /// the driver has no GL_EXT_blend_func_extended and subpixel antialiasing
+    /// has to be skipped.
+    pub dual_source_blending: bool,
     pub layers: RefCell<Vec<Rc<RenderLayer>>>,
 }
 
@@ -590,11 +646,13 @@ impl RenderState {
             let result = UtilSprites::new(&mut *glyph_cache.borrow_mut(), metrics);
             match result {
                 Ok(util_sprites) => {
-                    let glyph_prog = match &context {
+                    let (glyph_prog, dual_source_blending) = match &context {
                         RenderContext::Glium(context) => {
-                            Some(Self::compile_prog(&context, Self::glyph_shader)?)
+                            let (prog, dual_source) =
+                                Self::compile_prog(&context, Self::glyph_shader)?;
+                            (Some(prog), dual_source)
                         }
-                        RenderContext::WebGpu(_) => None,
+                        RenderContext::WebGpu(_) => (None, true),
                     };
 
                     let main_layer = Rc::new(RenderLayer::new(&context, 1024, 0)?);
@@ -604,6 +662,7 @@ impl RenderState {
                         glyph_cache,
                         util_sprites,
                         glyph_prog,
+                        dual_source_blending,
                         layers: RefCell::new(vec![main_layer]),
                     });
                 }
@@ -669,46 +728,73 @@ impl RenderState {
         Ok(allocated)
     }
 
+    /// Returns the compiled program, and whether the variant that made it
+    /// through uses dual-source blending.
     fn compile_prog(
         context: &Rc<GliumContext>,
-        fragment_shader: fn(&str) -> (String, String),
-    ) -> anyhow::Result<glium::Program> {
+        fragment_shader: fn(&str, bool) -> (String, String),
+    ) -> anyhow::Result<(glium::Program, bool)> {
         let mut errors = vec![];
 
         let caps = context.get_capabilities();
         log::trace!("Compiling shader. context.capabilities.srgb={}", caps.srgb);
 
         for version in &["330 core", "330", "320 es", "300 es"] {
-            let (vertex_shader, fragment_shader) = fragment_shader(version);
-            let source = glium::program::ProgramCreationInput::SourceCode {
-                vertex_shader: &vertex_shader,
-                fragment_shader: &fragment_shader,
-                outputs_srgb: true,
-                tessellation_control_shader: None,
-                tessellation_evaluation_shader: None,
-                transform_feedback_varyings: None,
-                uses_point_size: false,
-                geometry_shader: None,
-            };
-            match glium::Program::new(context, source) {
-                Ok(prog) => {
-                    return Ok(prog);
-                }
-                Err(err) => errors.push(format!("shader version: {}: {:#}", version, err)),
-            };
+            // Dual-source blending drives subpixel antialiasing, so prefer it,
+            // but it rests on GL_EXT_blend_func_extended, which plenty of GLES
+            // drivers do not have. Falling back to the single-output variant
+            // costs us subpixel AA and nothing else; failing here costs us the
+            // whole window.
+            for dual_source in [true, false] {
+                let (vertex_shader, fragment_shader) = fragment_shader(version, dual_source);
+                let source = glium::program::ProgramCreationInput::SourceCode {
+                    vertex_shader: &vertex_shader,
+                    fragment_shader: &fragment_shader,
+                    outputs_srgb: true,
+                    tessellation_control_shader: None,
+                    tessellation_evaluation_shader: None,
+                    transform_feedback_varyings: None,
+                    uses_point_size: false,
+                    geometry_shader: None,
+                };
+                match glium::Program::new(context, source) {
+                    Ok(prog) => {
+                        log::trace!(
+                            "compiled shader version {} (dual source blending: {})",
+                            version,
+                            dual_source
+                        );
+                        return Ok((prog, dual_source));
+                    }
+                    Err(err) => errors.push(format!(
+                        "shader version: {} (dual source blending: {}): {:#}",
+                        version, dual_source, err
+                    )),
+                };
+            }
         }
 
         anyhow::bail!("Failed to compile shaders: {}", errors.join("\n"))
     }
 
-    fn glyph_shader(version: &str) -> (String, String) {
+    fn glyph_shader(version: &str, dual_source: bool) -> (String, String) {
+        let dual_source = if dual_source {
+            "#define DUAL_SOURCE_BLENDING 1\n"
+        } else {
+            ""
+        };
         (
             format!(
                 "#version {}\n{}",
                 version,
                 include_str!("glyph-vertex.glsl")
             ),
-            format!("#version {}\n{}", version, include_str!("glyph-frag.glsl")),
+            format!(
+                "#version {}\n{}{}",
+                version,
+                dual_source,
+                include_str!("glyph-frag.glsl")
+            ),
         )
     }
 

@@ -168,14 +168,17 @@ impl crate::TermWindow {
         )
         .to_arrays_transposed();
 
-        let use_subpixel = match self
-            .config
-            .freetype_render_target
-            .unwrap_or(self.config.freetype_load_target)
-        {
-            FreeTypeLoadTarget::HorizontalLcd | FreeTypeLoadTarget::VerticalLcd => true,
-            _ => false,
-        };
+        // Subpixel antialiasing needs the shader's second colour output, which
+        // we only get where the driver supports dual-source blending.
+        let use_subpixel = gl_state.dual_source_blending
+            && match self
+                .config
+                .freetype_render_target
+                .unwrap_or(self.config.freetype_load_target)
+            {
+                FreeTypeLoadTarget::HorizontalLcd | FreeTypeLoadTarget::VerticalLcd => true,
+                _ => false,
+            };
 
         let dual_source_blending = glium::DrawParameters {
             blend: glium::Blend {

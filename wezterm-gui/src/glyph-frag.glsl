@@ -1,6 +1,13 @@
 // This is the Glyph fragment shader.
 // It is responsible for laying down the glyph graphics on top of the other layers.
+//
+// DUAL_SOURCE_BLENDING is defined by the shader compiler in renderstate.rs when
+// the driver can do dual-source blending. Without it there is no second colour
+// output to drive per-channel subpixel antialiasing, so colorMask becomes an
+// ordinary local that only the grayscale paths below read back.
+#ifdef DUAL_SOURCE_BLENDING
 #extension GL_EXT_blend_func_extended: enable
+#endif
 precision highp float;
 
 in float o_has_color;
@@ -10,11 +17,20 @@ in vec4 o_fg_color;
 in vec4 o_fg_color_alt;
 in float o_fg_color_mix;
 
+#ifdef DUAL_SOURCE_BLENDING
 // The color + alpha
 layout(location=0, index=0) out vec4 color;
 // Individual alpha channels for RGBA in color, used for subpixel
 // antialiasing blending
 layout(location=0, index=1) out vec4 colorMask;
+#else
+// The color + alpha
+out vec4 color;
+// Not a real output here; see the note at the top of the file. The draw
+// code never selects the subpixel path when this variant is in use, so
+// nothing downstream consumes it.
+vec4 colorMask;
+#endif
 
 uniform vec3 foreground_text_hsb;
 uniform sampler2D atlas_nearest_sampler;

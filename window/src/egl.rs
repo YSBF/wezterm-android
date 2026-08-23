@@ -638,32 +638,70 @@ impl GlState {
                     }
                 };
 
-            let mut attributes = vec![ffi::CONTEXT_MAJOR_VERSION, 3];
-            if cfg!(windows) {
-                // On Windows, where drivers may be dynamically unloaded,
-                // let's make an effort to try to survive that event.
-                for &a in &[
-                    ffi::CONTEXT_OPENGL_ROBUST_ACCESS_EXT,
-                    ffi::TRUE,
-                    ffi::CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT,
-                    ffi::LOSE_CONTEXT_ON_RESET_EXT,
-                ] {
-                    attributes.push(a);
+            // Ask for the most capable context the driver will give us.
+            //
+            // Requesting only a major version yields ES 3.0, and the shader
+            // version we can compile is capped by the context version: a 3.0
+            // context rejects `#version 320 es` outright with "client/version
+            // number not supported", before it ever looks at the shader body.
+            // So walk down from 3.2 and take the first one that is granted.
+            //
+            // Desktop GL keeps the bare major-version request it has always
+            // used; asking for 3.2 there would cap us below the 330 shaders.
+            let versions: &[(u32, Option<u32>)] = if connection.is_opengl {
+                &[(3, None)]
+            } else {
+                &[(3, Some(2)), (3, Some(1)), (3, None)]
+            };
+
+            let mut context = None;
+            for &(major, minor) in versions {
+                let mut attributes = vec![ffi::CONTEXT_MAJOR_VERSION, major];
+                if let Some(minor) = minor {
+                    // EGL 1.5 core, and EGL_KHR_create_context before that.
+                    // Drivers with neither fail this call and we fall through
+                    // to the bare major-version request below.
+                    attributes.push(ffi::CONTEXT_MINOR_VERSION);
+                    attributes.push(minor);
+                }
+                if cfg!(windows) {
+                    // On Windows, where drivers may be dynamically unloaded,
+                    // let's make an effort to try to survive that event.
+                    for &a in &[
+                        ffi::CONTEXT_OPENGL_ROBUST_ACCESS_EXT,
+                        ffi::TRUE,
+                        ffi::CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT,
+                        ffi::LOSE_CONTEXT_ON_RESET_EXT,
+                    ] {
+                        attributes.push(a);
+                    }
+                }
+                attributes.push(ffi::NONE);
+
+                match connection.egl.create_context(
+                    connection.display,
+                    config,
+                    std::ptr::null(),
+                    &attributes,
+                ) {
+                    Ok(c) => {
+                        log::trace!("created a {}.{} context", major, minor.unwrap_or(0));
+                        context = Some(c);
+                        break;
+                    }
+                    Err(e) => errors.push_str(&format!(
+                        "version {}.{}: {:#} {:x?}\n",
+                        major,
+                        minor.unwrap_or(0),
+                        e,
+                        config
+                    )),
                 }
             }
-            attributes.push(ffi::NONE);
 
-            let context = match connection.egl.create_context(
-                connection.display,
-                config,
-                std::ptr::null(),
-                &attributes,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    errors.push_str(&format!("{:#} {:x?}\n", e, config));
-                    continue;
-                }
+            let context = match context {
+                Some(c) => c,
+                None => continue,
             };
 
             log::trace!("Successfully created a surface using this configuration");
