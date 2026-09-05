@@ -174,6 +174,21 @@ When something dies in the renderer, check the `emuglGLESv2_enc` tag before
 believing the Rust backtrace — a GL error there explains a null-pointer panic
 that otherwise looks like a glium bug.
 
+## Rounded corners need a border colour
+
+Not a GLES issue, but it has bitten twice — once in the key row, once in the
+sidebar. `Element::border_corners` rounds a box by painting a `PolyStyle::Fill`
+oval into each corner square that the background fill deliberately *skips*. The
+poly takes its colour from `ElementColors::border`, so an element that rounds
+its corners while leaving `border: Default::default()` gets four transparent
+holes instead of four curves: a key renders as a cross, a sidebar button as a
+notched slab.
+
+Any element that calls `.border_corners(..)` must also set
+`border: BorderColor::new(bg)` on both `colors` and `hover_colors`, matching
+whatever background that state uses. `fancy_tab_bar.rs` has always done this;
+`keyrow.rs` and `sidebar.rs` did not.
+
 ## Current state
 
 Runs, draws, and takes input. Verified with `adb shell input text` driving a

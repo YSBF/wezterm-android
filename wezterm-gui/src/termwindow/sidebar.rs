@@ -38,8 +38,8 @@
 
 use crate::hosts::{ConfiguredDomain, HostProfile, HostRepository, KeyEntry};
 use crate::termwindow::box_model::{
-    BoxDimension, ComputedElement, Corners, DisplayType, Element, ElementColors, ElementContent,
-    Float, InheritableColor, LayoutContext, SizedPoly, VerticalAlign,
+    BorderColor, BoxDimension, ComputedElement, Corners, DisplayType, Element, ElementColors,
+    ElementContent, Float, InheritableColor, LayoutContext, SizedPoly, VerticalAlign,
 };
 use crate::termwindow::render::corners::{
     BOTTOM_LEFT_ROUNDED_CORNER, BOTTOM_RIGHT_ROUNDED_CORNER, TOP_LEFT_ROUNDED_CORNER,
@@ -736,13 +736,18 @@ impl TermWindow {
             // No vertical_align: a row is stacked against its neighbours in the
             // list, and asking to be centred would move it down by half the
             // list's height, taking every following row with it.
+            // `border_corners` below rounds the row, and a rounded corner is
+            // drawn by a poly painted in the *border* colour into a square the
+            // background fill deliberately skips. A transparent border therefore
+            // leaves four holes rather than four curves, so the border colour has
+            // to track the background.
             .colors(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(self.sidebar_row_color()),
                 bg: InheritableColor::Color(self.sidebar_row_color()),
                 text: InheritableColor::Color(self.sidebar_text_color()),
             })
             .hover_colors(Some(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(self.sidebar_row_pressed_color()),
                 bg: InheritableColor::Color(self.sidebar_row_pressed_color()),
                 text: InheritableColor::Color(self.sidebar_text_color()),
             }))
@@ -795,12 +800,12 @@ impl TermWindow {
             .min_width(Some(Dimension::Pixels(dp(ICON_DP, dpi))))
             .min_height(Some(Dimension::Pixels(dp(ICON_DP, dpi))))
             .colors(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(self.sidebar_row_color()),
                 bg: InheritableColor::Color(self.sidebar_row_color()),
                 text: InheritableColor::Color(self.sidebar_text_color()),
             })
             .hover_colors(Some(ElementColors {
-                border: Default::default(),
+                border: BorderColor::new(self.sidebar_row_pressed_color()),
                 bg: InheritableColor::Color(self.sidebar_row_pressed_color()),
                 text: InheritableColor::Color(self.sidebar_text_color()),
             }))
@@ -885,12 +890,12 @@ impl TermWindow {
                     .min_width(Some(Dimension::Pixels(share)))
                     .min_height(Some(Dimension::Pixels(dp(ROW_HEIGHT_DP, dpi))))
                     .colors(ElementColors {
-                        border: Default::default(),
+                        border: BorderColor::new(self.sidebar_row_color()),
                         bg: InheritableColor::Color(self.sidebar_row_color()),
                         text: InheritableColor::Color(self.sidebar_text_color()),
                     })
                     .hover_colors(Some(ElementColors {
-                        border: Default::default(),
+                        border: BorderColor::new(self.sidebar_row_pressed_color()),
                         bg: InheritableColor::Color(self.sidebar_row_pressed_color()),
                         text: InheritableColor::Color(self.sidebar_text_color()),
                     }))
